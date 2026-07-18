@@ -32,11 +32,16 @@ function App() {
   const messagesEndRef = useRef(null);
 
   const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   };
 
   useEffect(() => {
-    scrollToBottom();
+    // A small timeout ensures the browser has calculated the final heights 
+    // of the new DOM elements (like the Biblical References card) before scrolling.
+    const timer = setTimeout(() => {
+      scrollToBottom();
+    }, 100);
+    return () => clearTimeout(timer);
   }, [messages, isLoading]);
 
   const handleSubmit = async (e) => {
@@ -96,7 +101,7 @@ function App() {
       <header className="header">
         <div className="header-title">
           <BookOpen size={28} color="#a78bfa" />
-          <span>BibleChat</span>
+          <span>Ask Madha</span>
         </div>
         <div className="language-selector">
           <select 
@@ -116,7 +121,7 @@ function App() {
         {messages.length === 0 ? (
           <div className="empty-state">
             <Book size={64} />
-            <h2>Welcome to BibleChat</h2>
+            <h2>Welcome to Ask Madha</h2>
             <p>Ask any question about the Bible in English or Tamil.</p>
           </div>
         ) : (
@@ -158,7 +163,7 @@ function App() {
             </div>
           </div>
         )}
-        <div ref={messagesEndRef} />
+        <div ref={messagesEndRef} style={{ height: '1px', flexShrink: 0 }} />
       </main>
 
       <div className="input-container">
