@@ -18,8 +18,7 @@ bible_bot_v7/
 │   ├── english_bible/
 │   │   └── English_bible_full.json
 │   └── tamil_bible/
-│       ├── tamil_bible_full.json
-│       └── TNBCLC-BSI/             # Source SFM files for Tamil Bible
+│       └── tamil_bible_full.json
 ├── frontend/                       # React + Vite UI (port 5173)
 └── start.bat                       # One-click launcher for Windows
 ```
