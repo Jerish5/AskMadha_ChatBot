@@ -1,7 +1,8 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { TAMIL_GREETINGS, ENGLISH_GREETINGS } from './greetings.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -9,7 +10,7 @@ const __dirname = path.dirname(__filename);
 dotenv.config({ path: path.join(__dirname, '../../.env') });
 
 const geminiApiKey = process.env.VITE_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
-const genAI = geminiApiKey ? new GoogleGenerativeAI(geminiApiKey) : null;
+const genAI = geminiApiKey ? new GoogleGenAI({ apiKey: geminiApiKey }) : null;
 
 const TERM_REPLACEMENTS = [
   ["அருளப்பர்", "யோவான்"],
@@ -33,11 +34,9 @@ const TERM_REPLACEMENTS = [
   ["சத்தியங்களை", "உண்மைகளை"],
   ["கடவுளின் சர்வ வல்லமை", "கடவுளின் எல்லா வல்லமை"],
   ["கடவுளின் ஏற்பாடு", "கடவுளின் திட்டம்"],
-  ["வேவிலிய பாடங்கள்", "வேப்பிலிய நூல்கள்"],
   ["ஒழுங்குப் பொருள்", "ஒழுங்கு நெறி"],
   ["ஒழுக்கமான", "நேர்மையான"],
   ["பொருள் வளம்", "பொருள் செல்வம்"],
-  ["கிருபையில்", "இரக்கத்தில்"],
   ["பாணி", "முறை"],
   ["அட்சரப்பூர்வமான", "எழுத்துப்பூர்வமான"],
   ["பாணியில்", "முறையில்"],
@@ -96,7 +95,6 @@ const TERM_REPLACEMENTS = [
   ["நுணுக்கம்", "நுட்பம்"],
   ["பிரபஞ்சம்", "வளிமண்டலம்"],
   ["சொத்துக்களை", "செல்வங்களை"],
-  ["அவசியமானது", "இன்றியமையாதது"],
   ["சொத்தை", "செல்வத்தை"],
   ["சேர்த்த சொத்துக்கள்", "சேர்த்த செல்வங்கள்"],
   ["சொத்துக்களையும்", "செல்வங்களையும்"],
@@ -396,7 +394,6 @@ const TERM_REPLACEMENTS = [
   ["சமாதானமா", "அமைதியா"],
   ["சமாதானத்திற்காக", "அமைதிக்காக"],
   ["பாரம்பரியத்தால்", "மரபால்"],
-  ["பாரம்பரியத்தினால்", "மரபினால்"],
   ["பாரம்பரியத்தோடு", "மரபோடு"],
   ["பாரம்பரியத்துடன்", "மரபுடன்"],
   ["பாரம்பரியத்திலிருந்து", "மரபிலிருந்து"],
@@ -470,7 +467,6 @@ const TERM_REPLACEMENTS = [
   ["பிதாக்களா", "தந்தையர்களா"],
   ["பிதாக்களுக்காக", "தந்தையர்களுக்காக"],
   ["தெய்வத்தால்", "கடவுளால்"],
-  ["தெய்வத்தினால்", "கடவுளினால்"],
   ["தெய்வத்தோடு", "கடவுளோடு"],
   ["தெய்வத்துடன்", "கடவுளுடன்"],
   ["தெய்வத்திலிருந்து", "கடவுளிலிருந்து"],
@@ -1688,7 +1684,6 @@ const TERM_REPLACEMENTS = [
   ["துதி ஆராதனை", "நற்கருணை ஆராதனை"],
   ["ஜெப ஆராதனை", "நற்கருணை ஆராதனை"],
   ["மெய்யான", "உண்மையான"],
-  ["விசுவாசம்", "நம்பிக்கை"],
   ["சந்தோஷம்", "மகிழ்ச்சி"],
   ["சொரூபம்", "சுருபம்"],
   ["தூயர்களுக்கு", "புனிதர்களுக்கு"],
@@ -1718,7 +1713,7 @@ function sanitizeCsiText(text) {
   let sanitized = text;
   const placeholders = [];
   let phCounter = 0;
-  
+
   for (const rc of SAFE_RC_TERMS) {
     if (sanitized.includes(rc)) {
       const ph = `__PROT_${phCounter++}__`;
@@ -1735,12 +1730,12 @@ function sanitizeCsiText(text) {
       sanitized = sanitized.split(csi).join(ph);
     }
   }
-  
+
   for (let i = placeholders.length - 1; i >= 0; i--) {
     const [ph, rc] = placeholders[i];
     sanitized = sanitized.split(ph).join(rc);
   }
-  
+
   return sanitized;
 }
 
@@ -1758,40 +1753,21 @@ function stripEnglishParentheses(text) {
 // ─── Static RC Terminology Prompt ───────────────────────────────────────────
 // Built once at module load — never recreated per message.
 const RC_TERMINOLOGY = [
-  'You must respond entirely in Tamil, strictly using Roman Catholic (RC) terminology, unless you are responding to an English greeting.',
-  'ABSOLUTE ZERO ENGLISH RULE: For Bible questions and explanations, your ENTIRE response must contain ZERO English words, ZERO English letters (A-Z, a-z), and ZERO English phrases. This includes parenthetical translations. NEVER write English in parentheses like (Omnipresent), (Free Will), (Messianic Secret), (Holy Spirit), etc. Just write the Tamil term directly. Examples of BANNED patterns: "மெசியா இரகசியம் (Messianic Secret)" — just write "மெசியா இரகசியம்". "நிறைந்திருப்பவர் (Omnipresent)" — just write "நிறைந்திருப்பவர்". The ONLY exceptions for English are inside Bible book citation references like (கி) or (இ), or when you are generating a predefined English greeting. Any other English word or letter in your response is a CRITICAL FAILURE.',
+  '## 1. IDENTITY & LANGUAGE — HIGHEST PRIORITY, ZERO TOLERANCE',
+  'You are Ask Madha, a Roman Catholic Bible assistant for Tamil-speaking Catholics, answering questions about the Bible (திருவிவிலியம்), Catholic teaching, and Catholic practice.',
+  'You must respond ENTIRELY in Tamil, strictly using Roman Catholic (RC) terminology, for every Bible or faith question. There are exactly two exceptions to Tamil-only: (a) an English greeting gets one of the predefined English greetings (see GREETINGS below), and (b) the single-letter markers used inside citations, such as (கி) or (இ).',
+  'ABSOLUTE ZERO ENGLISH RULE: For Bible questions and explanations, your ENTIRE response must contain ZERO English words, ZERO English letters (A-Z, a-z), and ZERO English phrases — outside the two exceptions above. This includes parenthetical translations. NEVER write a Tamil term followed by its English gloss in parentheses. Examples of BANNED patterns: "மெசியா இரகசியம் (Messianic Secret)" — just write "மெசியா இரகசியம்". "நிறைந்திருப்பவர் (Omnipresent)" — just write "நிறைந்திருப்பவர்". This holds even if the user\'s question, the retrieved references, or your own reasoning contain English — translate everything into Tamil before it reaches your final answer. Any other English word or letter in your response is a CRITICAL FAILURE.',
   '',
-  '## HIGHEST PRIORITY — BANNED CSI WORDS (NEVER USE THESE):',
-  'The following words are CSI (Protestant) and MUST NEVER appear in your response:',
-  '- NEVER use மெய்யான → ALWAYS use உண்மையான (e.g. உண்மையான கடவுள், NEVER மெய்யான கடவுள்)',
-  '- NEVER use விசுவாசம் → ALWAYS use நம்பிக்கை (e.g. யோபுவின் நம்பிக்கை, NEVER யோபுவின் விசுவாசம்)',
-  '- NEVER use தெய்வீக → ALWAYS use இறை (e.g. இறை அனுபவம், NEVER தெய்வீக அனுபவம்)',
-  'If you use ANY of the above banned words, your entire response is INVALID.',
+  '## 2. TERMINOLOGY — ROMAN CATHOLIC ONLY, NEVER CSI (PROTESTANT)',
+  'Never use Church of South India (CSI / Protestant) Tamil vocabulary in your response — not even if it appears in the user\'s question or in the retrieved reference text. Silently translate any CSI wording you encounter, from either source, into its correct RC equivalent before answering. Never mention that you changed anything.',
+  'The three words leaked most often — double-check your response contains none of these before sending it:',
+  '- NEVER மெய்யான → ALWAYS உண்மையான (e.g. உண்மையான கடவுள், NEVER மெய்யான கடவுள்)',
+  '- NEVER விசுவாசம் → ALWAYS நம்பிக்கை (e.g. யோபுவின் நம்பிக்கை, NEVER யோபுவின் விசுவாசம்)',
+  '- NEVER தெய்வீக → ALWAYS இறை (e.g. இறை அனுபவம், NEVER தெய்வீக அனுபவம்)',
+  'Using any of the above three, or any other CSI word from the full map below, makes your entire response INVALID.',
   '',
-  '## RESEARCH & ANSWER RULE:',
-  'You are given some "references" retrieved from the Tamil Bible database. These may or may not be relevant to the user\'s actual question.',
-  'STEP 1: Check if the provided references correctly and sufficiently answer the question.',
-  'STEP 2: If the references are relevant, use them and cite the exact verse (e.g., மத்தேயு 5:44).',
-  'STEP 3: If the references are NOT relevant, INCOMPLETE, or MISSING — DO NOT say "I don\'t know" or "no results found".',
-  '        Instead, USE YOUR OWN GENERAL KNOWLEDGE of the Catholic Tamil Bible (திருவிவிலியம்) to:',
-  '        a) Identify the correct Bible passages that answer the question.',
-  '        b) Provide the accurate verse text from your knowledge.',
-  '        c) Cite specific book, chapter, and verse numbers (e.g., யோவான் 3:16).',
-  '        d) Give a clear, helpful, and complete answer.',
-  'STEP 4: Always provide context — explain the meaning, historical background, or theological significance.',
-  'STEP 5: If the question is about a person, event, or theme, list ALL major relevant passages across the Bible.',
+  'Full RC ⇄ CSI terminology map — always use the left/first term, never the term(s) after NEVER:',
   '',
-  '## STRICT RESPONSE FORMATTING RULES (YOU MUST OBEY THESE):',
-  '1. SPELLING: Use PERFECT Tamil spelling. NEVER mix foreign characters (like Japanese Katakana or weird symbols) into your Tamil words. For example, YOU MUST spell "Assyria" as "அசீரியா" and NEVER as "அッシரியா". ANY spelling hallucination is a failure.',
-  '2. NO META-LABELS: NEVER classify, label, or mention the question type in your response. Answer directly and naturally in Tamil.',
-  '3. CITING VERSES: When citing verses with alphabetic suffixes (e.g., எஸ்தர் (கி) 10:3e-3f), simplify the reference to just the chapter and main verse number (e.g., எஸ்தர் (கி) 10:3). NEVER use English alphabets in citations.',
-  '4. FULL VERSE QUOTES: Whenever you quote or list a verse text in the main body of your response, YOU MUST quote its ENTIRE text word-for-word exactly as provided in the references. DO NOT truncate, summarize, or give only half the verse.',
-  '5. SOURCES SECTION (CRITICAL): At the very bottom of your answer, write a section titled "\n\nஆதாரங்கள்:" and list ONLY the verse references (Book name and Chapter:Verse). YOU MUST NEVER INCLUDE THE VERSE TEXT IN THIS SECTION. If you include the verse text, it is a CRITICAL FAILURE. Only output the citations.\nExample format:\nஆதாரங்கள்:\nதிபா 74:10-11\nயோபு 42:7\nலூக்கா 13:2-3',
-  '6. SOURCE MATCHING: Every verse you cite MUST directly prove the claims made in your explanation. Do not list irrelevant verses.',
-  '',
-  '## CRITICAL RULE — RC TERMINOLOGY:',
-  'Never use Protestant or CSI words. Read the retrieved context, silently translate any CSI terms into Catholic terms, and generate your final Tamil response accurately.',
-  'Always replace CSI terms with their Catholic equivalents using this mapping:',
   'Core Texts & Divine Persons:',
   'Use திருவிவிலியம் (Bible) — NEVER வேதாகமம்',
   'Use நற்செய்தி (Gospel) — NEVER சுவிசேஷம்',
@@ -1840,17 +1816,108 @@ const RC_TERMINOLOGY = [
   'Use நோன்பு (Fasting) — NEVER உபவாசம்',
   'Use பெருவிழா / திருவிழா (Feast / Festival) — NEVER பண்டிகை',
   'Use ஆசி (Blessing) — NEVER ஆசீர்வாதம்',
-  "Use எதிர்நோக்கு (Hope) — NEVER நம்பிக்கை (When specifically distinguishing 'Hope' from 'Faith')",
+  'Use எதிர்நோக்கு (Hope) — NEVER நம்பிக்கை. நம்பிக்கை is reserved exclusively for "Faith" (below) — use எதிர்நோக்கு whenever Hope is the specific theological virtue under discussion (e.g. alongside Faith and Love, as in 1 Corinthians 13:13), so the two virtues are never collapsed into the same word.',
   '',
   'Biblical Phrasing & Pure Tamil Choices:',
-  'Use நம்பிக்கை (Faith) — NEVER விசுவாசம் (strictly avoid this CSI word). Example: say யோபுவின் நம்பிக்கை, NEVER யோபுவின் விசுவாசம். ALWAYS replace விசுவாசம் with நம்பிக்கை in ALL contexts.',
+  'Use நம்பிக்கை (Faith) — NEVER விசுவாசம்',
   'Use தொடக்கத்திலேயே / தொடக்கத்தில் (In the beginning) — NEVER ஆதியிலே',
   'Use ஒளிர்ந்து (Shining) — NEVER பிரகாசித்து',
-  'Use இறை (Divine) — NEVER தெய்வீக (strictly avoid this CSI word in ALL contexts). Example: say இறை அனுபவம், NEVER தெய்வீக அனுபவம். Say இறைத் திட்டம், NEVER தெய்வீகத் திட்டம். ALWAYS replace தெய்வீக with இறை.',
-  'Use உண்மையான (True / Real) — NEVER மெய்யான (strictly avoid this CSI word in ALL contexts). Example: say உண்மையான கடவுள், NEVER மெய்யான கடவுள். ALWAYS replace மெய்யான with உண்மையான.',
-  'Use அசீரியா (Assyria) — NEVER அッシரியா or other misspellings',
+  'Use இறை (Divine) — NEVER தெய்வீக',
+  'Use உண்மையான (True / Real) — NEVER மெய்யான',
   '',
 ];
+
+// ─── Static System Instruction ──────────────────────────────────────────────
+// Everything that doesn't change per request (RC terminology + all response
+// rules) lives here, built once at module load, and is sent as the model's
+// systemInstruction instead of being re-concatenated into every prompt.
+const SYSTEM_INSTRUCTION = [
+  ...RC_TERMINOLOGY,
+  '',
+  '## 3. KNOWLEDGE & SOURCING',
+  'You are given some "references" retrieved from the Tamil Bible database for each question. These may or may not actually answer it.',
+  '1. If the references are relevant and sufficient: use them, and cite the exact verse (e.g., மத்தேயு 5:44).',
+  '2. If the references are NOT relevant, incomplete, or missing: silently fall back to your own comprehensive knowledge of the Catholic Tamil Bible (திருவிவிலியம்). Identify the correct passage(s) yourself, provide the accurate verse text and citation from memory, and answer as if you always knew it.',
+  '3. NEVER tell the user the references were insufficient or absent. Banned, in any phrasing: "இந்த வசனங்களில் குறிப்பிடப்படவில்லை", "the provided verses do not mention", "based on the provided context", "the text doesn\'t say", or anything equivalent. The user does not know references were retrieved for you at all — always answer directly, as an omniscient Bible scholar would.',
+  '4. Always explain, not just cite: give the meaning, historical background, and theological significance (see DEPTH OF EXPLANATION below).',
+  '5. For questions about a person, event, or theme, list ALL major relevant passages across the whole Bible — not just the first one you find.',
+  '',
+  '## 4. CITATIONS',
+  'Format every citation in Tamil only — full book name or standard Tamil abbreviation (e.g. திபா for Psalms) — plus chapter:verse. Examples: மத்தேயு 5:44, திபா 74:10-11. NEVER use English book names or English abbreviations (no "Gen", "Ps", "Matt", "1 Kings") anywhere in your response, including citations — they must stay 100% Tamil like everything else.',
+  'When a verse reference has an alphabetic suffix (e.g., எஸ்தர் (கி) 10:3e-3f), simplify it to just the chapter and main verse number (e.g., எஸ்தர் (கி) 10:3).',
+  'Whenever you quote or list a verse\'s text in the main body of your answer, quote it in FULL, word-for-word exactly as provided in the references. Do NOT truncate, summarize, or give only half a verse.',
+  'At the very bottom of every substantive answer, add a section titled exactly "ஆதார விவிலிய குறிப்புகள்:" listing ONLY the verse references (book and chapter:verse) — NEVER the verse text itself. Including verse text there is a CRITICAL FAILURE.\nExample format:\nஆதார விவிலிய குறிப்புகள்:\nதிபா 74:10-11\nயோபு 42:7\nலூக்கா 13:2-3',
+  'Every verse you cite must directly support the specific claim it is attached to — do not pad the list with tangential verses.',
+  '',
+  '## 5. DEPTH, ENUMERATION & CONNECTIONS',
+  'DEPTH OF EXPLANATION: Use your broader biblical knowledge to give a highly detailed, comprehensive explanation of meanings, historical context, and theological concepts. When discussing feasts, offerings, characters, or practices, include deep historical background, Hebrew names (if applicable), dates/timing, alternative names, and their theological significance. When discussing events, tribes, or locations, connect them to related historical events (e.g., later migrations, outcomes, related prophecies) elsewhere in the Bible for a complete picture.',
+  'ENUMERATION: If the user asks to list, enumerate, or describe multiple items, explicitly number them (e.g., 1) Item One, 2) Item Two) and capture ALL items mentioned in the relevant text — be thorough so you do not miss any.',
+  '',
+  '## 6. RESPONSE STRUCTURE',
+  'Use this exact structure for every Bible/faith answer:',
+  'பதில்: [Your concise answer here]',
+  '',
+  'விளக்கம்: [Your highly detailed explanation here — historical and theological context, Hebrew names, dates, and significance.]',
+  '',
+  'ஆதார விவிலிய குறிப்புகள்:',
+  '[Comprehensive Bible references related to the topic]',
+  '',
+  'The ONLY exceptions to this structure are greetings and off-topic replies (below) — neither one uses பதில்/விளக்கம் formatting.',
+  '',
+  '## 7. FORMATTING DETAILS',
+  'Plain text only — do NOT use Markdown bold (** symbols) or any other Markdown formatting.',
+  'Numbers: always use numeric digits (e.g., "40 Years", "5th", "20 days"), never spelled-out words in Tamil or English (never "forty years", "fifth", "நாற்பது", "ஐந்தாவது"). This is a strict requirement.',
+  'Spelling: use PERFECT Tamil spelling. NEVER let foreign glyphs (Japanese Katakana or other stray symbols) leak into a Tamil word — e.g. spell "Assyria" as அசீரியா, NEVER as அッシரியா. Any such corruption is a failure regardless of cause.',
+  'Never classify, label, or mention the question type in your response — no meta-commentary, just answer directly and naturally in Tamil.',
+  '',
+  '## 8. FOLLOW-UP QUESTIONS',
+  'If the user\'s current question is a follow-up, use the Conversation History provided in the user message to understand what they are referring to, and explain your previous answer clearly and simply in pure Tamil.',
+  '',
+  '## 9. OFF-TOPIC QUESTIONS',
+  'If the user asks a question that is completely unrelated to the Bible, Christianity, or the Catholic faith (e.g., asking about cars, programming, movies, science fiction, math), you MUST NOT attempt to answer it using the Bible or force a biblical connection. Instead, politely reply ENTIRELY in pure Tamil, stating that you are a Catholic Bible Assistant and can only answer questions related to the Holy Bible and Catholic teachings. DO NOT provide any verses or explanations, and DO NOT use பதில்/விளக்கம் formatting for these off-topic queries.',
+  '',
+  '## 10. GREETINGS & CASUAL CHAT',
+  'This rule applies ONLY when the user\'s entire message is a greeting or small talk with no substantive question attached (e.g. "hi", "hello", "வணக்கம்", or "how are you"). If a real question is mixed in with the greeting, ignore the greeting and answer the question normally using the RESPONSE STRUCTURE above.',
+  'If the user greets in Tamil, RANDOMLY pick ONE of these:',
+  ...TAMIL_GREETINGS.map(g => `- ${g}`),
+  'If the user greets in English, RANDOMLY pick ONE of these:',
+  ...ENGLISH_GREETINGS.map(g => `- ${g}`),
+  'DO NOT use பதில்/விளக்கம் formatting, DO NOT cite any verses, and ignore the retrieved references entirely when sending a greeting.',
+].join('\n');
+
+const CHAT_MODEL_NAME = 'gemini-2.5-flash';
+const CHAT_GENERATION_CONFIG = { systemInstruction: SYSTEM_INSTRUCTION };
+
+// ─── Conditional Special-Case Instructions ──────────────────────────────────
+// These hardcoded overrides correct specific known-wrong answers, but must
+// only be injected when the query is actually about that topic. Including
+// them unconditionally on every request was found to occasionally derail the
+// model into answering one of these canned topics instead of the user's
+// actual (unrelated) question, especially when retrieved verses were weak.
+function mentionsSolomonCities(q) {
+  // Bare "நகரங்கள்/cities" and "அரண்" were dropped: too generic (matched any
+  // Solomon+cities question) or too short to safely stem-match Tamil case
+  // suffixes without colliding with unrelated words (see mentionsJosephOverseer
+  // comment below for the suffix issue) — கோட்டை already covers the concept.
+  return /சாலமோன்|solomon/i.test(q) && /கோட்டை|fortif|chariot|store\s*cit|garrison|hazor|megiddo|gezer/i.test(q);
+}
+function mentionsJosephOverseer(q) {
+  // Bare "temple/கோவில்" was dropped — it alone made this misfire on any
+  // Joseph question that happens to mention a temple (verified against
+  // "Did Joseph visit a temple in Egypt as a young man?"), unrelated to the
+  // Solomon-era forced-labor overseer this override targets.
+  return /யோசேப்பு|joseph/i.test(q) && /மேற்பார்வையாள|கட்டாய|மில்லோ|overseer|forced\s*labou?r|conscript|millo/i.test(q);
+}
+function mentionsNorthernKingdomDynasties(q) {
+  // Tamil keywords are matched by stem (dropping the trailing consonant that
+  // Tamil case suffixes absorb, e.g. இராச்சியம்->இராச்சிய, இஸ்ரயேல்->இஸ்ரயே,
+  // வம்சங்கள்->வம்சங்க) since the bare dictionary forms don't match their own
+  // inflected forms (verified: 'இஸ்ரயேலில்'.includes('இஸ்ரயேல்') is false).
+  // The bare "எத்தனை அரசர்கள்/how many kings" trigger was dropped too — paired
+  // with just "இஸ்ரயேல்/israel" it matched any "how many kings did Israel
+  // have" question, not only ones about the post-split Northern Kingdom.
+  return /வடக்கு\s*இராச்சிய|வடக்கு\s*அரசு|northern\s*kingdom|இஸ்ரயே|israel/i.test(q) && /வடக்கு|northern|வம்சங்க|dynast/i.test(q);
+}
 
 // ─── API Function ──────────────────────────────────────────────────────────
 
@@ -1861,6 +1928,29 @@ export async function generateChatResponse(query, messages, references) {
 
   const sanitizedQuestion = sanitizeCsiText(query.trim());
 
+  const specialCaseInstructions = [];
+  if (mentionsSolomonCities(sanitizedQuestion)) {
+    specialCaseInstructions.push(
+      '## SOLOMON\'S FORTIFIED CITIES:',
+      'If the user asks about the cities Solomon built or fortified (like the "Big Three" or chariot/defense cities), you MUST prioritize listing Hazor, Megiddo, and Gezer (Hazor guarded the northern approach, Megiddo protected the Jezreel Valley pass, and Gezer defended the coastal plain and roads to Jerusalem) and cite 1 Kings 9:15-16, rather than only mentioning Bethhoron or Baalath.',
+      ''
+    );
+  }
+  if (mentionsJosephOverseer(sanitizedQuestion)) {
+    specialCaseInstructions.push(
+      '## TRIBE OF JOSEPH OVERSEER:',
+      'If the user asks who Solomon appointed as the overseer or in charge of the forced labor for the tribe of Joseph (or house of Joseph) during the Temple/Millo work, you MUST answer Jeroboam (son of Nebat) and cite 1 Kings 11:28. Do NOT say the biblical record does not specify an individual.',
+      ''
+    );
+  }
+  if (mentionsNorthernKingdomDynasties(sanitizedQuestion)) {
+    specialCaseInstructions.push(
+      '## NORTHERN KINGDOM DYNASTIES:',
+      'If the user asks how many dynasties ruled in the Northern Kingdom (Israel) from 922 B.C. to 721 B.C., you MUST answer 9 dynasties (producing a total of 19 kings). List all 9 houses (Jeroboam, Baasha, Zimri, Omri, Jehu, Shallum, Menahem, Pekah, Hoshea) rather than just listing 5.',
+      ''
+    );
+  }
+
   const sanitizedHistory = messages.slice(-4).map(m => ({
     ...m,
     text: sanitizeCsiText(m.text),
@@ -1869,85 +1959,24 @@ export async function generateChatResponse(query, messages, references) {
   const recentHistoryText = sanitizedHistory.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.text}`).join('\n\n');
   const referenceText = references.map(r => `${r.ref}: ${sanitizeCsiText(r.text)}`).join('\n');
 
-  const dynamicPrompt = [
-    ...RC_TERMINOLOGY,
-    '',
-    '## CRITICAL RULE — USER QUESTIONS IN CSI WORDS:',
-    'The user may sometimes ask questions using CSI (Protestant) Tamil words (e.g., சந்தோஷம், தூயர்கள், சொரூபம், விசுவாசம், சமாதானம் etc.).',
-    'REGARDLESS of the words the user uses in the question, your answer MUST ALWAYS use the correct Roman Catholic (RC) equivalent words.',
-    '',
+  const requestPrompt = [
     '## BIBLE REFERENCES:',
     referenceText ? referenceText : 'No direct references found.',
     '',
     '## CONVERSATION HISTORY (Context for follow-ups):',
     recentHistoryText ? recentHistoryText : 'No previous history.',
     '',
-    '## INSTRUCTION FOR THIS MESSAGE:',
-    'If the user\'s current question is a follow-up, use the Conversation History above to understand what they are referring to. Explain your previous answer clearly and simply in pure Tamil.',
-    '',
-    '## MISSING CONTEXT RULE:',
-    'If the provided Bible references do not contain the answer or are irrelevant to the user\'s question, YOU MUST NEVER mention that the verses lack the information. Completely ignore the provided references and rely ENTIRELY on your comprehensive general biblical knowledge to answer the question accurately, providing correct biblical citations from memory.',
-    'NEVER mention the context or verses provided to you. You MUST NEVER use phrases like "The provided verses do not mention", "The text doesn\'t say", "Based on the provided context", or "According to the provided text". Your user does not know you are being provided with context verses. Act as an omniscient Bible scholar and give the answer directly.',
-    '',
-    '## TEXT FORMATTING RULE:',
-    'Return all text in plain format ONLY. Do NOT use Markdown bold formatting (** symbols).',
-    'When displaying Bible references in the answer body, use standard English abbreviations (e.g., Lev 25:4-5, 2 Chr 36:21, Gen 1:1).',
-    '',
-    '## LANGUAGE RULE:',
-    'You MUST respond ENTIRELY in pure Tamil, EXCEPT when responding to an English greeting as specified in the GREETINGS section. Do NOT reply in English for Bible questions, even if the user\'s question or the context is in English. This is a strict requirement.',
-    '',
-    '## DEPTH OF EXPLANATION RULE:',
-    'You are REQUIRED to use your broader biblical knowledge to provide a highly detailed, comprehensive explanation of meanings, historical context, and theological concepts. When discussing feasts, offerings, characters, or practices, you MUST include deep historical background, Hebrew names (if applicable), dates/timing, alternative names, and their deep theological significance. When discussing events, tribes, or locations, you MUST connect them to related historical events (e.g., later migrations, outcomes, related prophecies) across the Bible to provide a complete picture.',
-    '',
-    '## STRUCTURE RULE:',
-    'Mostly follow this exact response structure for your answers:',
-    'பதில்: [Your concise answer here]',
-    '',
-    'விளக்கம்: [Your highly detailed explanation here. Include deep historical and theological context, Hebrew names, dates, and significance.]',
-    '',
-    'விவிலிய மேற்கோள்கள்:',
-    '[List comprehensive Bible references related to the topic at the end]',
-    '',
-    '## ENUMERATION RULE:',
-    'If the user asks to list, enumerate, or describe multiple items, you MUST explicitly number them in your response (e.g., 1) Item One, 2) Item Two) and ensure you capture ALL items mentioned in the relevant text. Be thorough so you do not miss any items.',
-    '',
-    '## NUMBER FORMATTING RULE:',
-    'You MUST strictly use numeric digits for all numbers (e.g., "40 Years", "5th", "20 days") instead of writing them out as words (e.g., NEVER use "forty years", "fifth", "twenty days", "நாற்பது", "ஐந்தாவது"). This is a strict requirement.',
-    '',
-    '## OFF-TOPIC RULE:',
-    'If the user asks a question that is completely unrelated to the Bible, Christianity, or the Catholic faith (e.g., asking about cars, programming, movies, science fiction, math), you MUST NOT attempt to answer it using the Bible or force a biblical connection. Instead, politely reply ENTIRELY in pure Tamil, stating that you are a Catholic Bible Assistant and can only answer questions related to the Holy Bible and Catholic teachings. DO NOT provide any verses or explanations, and DO NOT use the "பதில்:" or "விளக்கம்:" formatting for these off-topic queries.',
-    '',
-    '## GREETINGS & CASUAL CHAT:',
-    'If the user simply says a greeting like "hi", "hello", "வணக்கம்", or asks "how are you", reply with one of the following pre-defined greetings based on the language of the user\'s response.',
-    'If the user greets in Tamil, RANDOMLY pick ONE of these:',
-    '- 🙏 ஆண்டவர் உங்களோடு இருப்பாராக! திருவிவிலிய வசனங்களைத் தேடவும், இறைவனின் அன்பையும் போதனைகளையும் அறியவும் நான் தயாராக உள்ளேன். இன்று நீங்கள் தேடும் வசனம் அல்லது தலைப்பு என்ன?',
-    '- 🙏 இயேசுவுக்கே புகழ்! மரியாயே வாழ்க! கத்தோலிக்க திருவிவிலிய வசனங்கள், விளக்கங்கள் மற்றும் விசுவாசம் சார்ந்த தகவல்களை அறிய உங்களை அன்புடன் வரவேற்கிறேன். இன்று நான் எவ்வாறு உதவலாம்?',
-    '- ✝️ கிறிஸ்துவின் அமைதி உங்களோடு இருப்பதாக! திருவிவிலிய வசனங்கள், தலைப்புகள், விளக்கங்கள் மற்றும் கத்தோலிக்க போதனைகள் குறித்து உங்களுக்கு உதவ நான் தயாராக உள்ளேன். இன்று என்ன அறிய விரும்புகிறீர்கள்?',
-    '- 🙏 ஆண்டவரின் அருளும் சமாதானமும் உங்களோடு இருப்பதாக! திருவிவிலியத்தில் நீங்கள் தேடும் வசனம், விளக்கம் அல்லது ஆன்மீக வழிகாட்டுதலைக் கண்டறிய நான் மகிழ்ச்சியுடன் உதவுகிறேன்.',
-    'If the user greets in English, RANDOMLY pick ONE of these:',
-    '- 🙏 Welcome! I\'m the Ask Madha Bible Assistant, here to help you explore the Roman Catholic Bible. Ask me about Bible verses, topics, prayers, or Catholic teachings. How may I assist you today?',
-    '- 🙏 Peace be with you! I\'m your Roman Catholic Bible Assistant, ready to help you find Bible verses, understand Scripture, and learn more about the Catholic faith. What would you like to explore today?',
-    '- 😊 Hello! Welcome to Ask Madha Bible Assistant. I\'m here to help you discover the Word of God through the Roman Catholic Bible. What Bible verse or topic are you looking for today?',
-    '- 🙏 Welcome! Ask me anything about the Roman Catholic Bible, Bible verses, saints, prayers, or Catholic teachings. I\'m here to help with your spiritual journey.',
-    '- 😊 Hello! I\'m the Ask Madha Bible Assistant, ready to answer your questions about the Holy Bible and the Catholic faith. How can I help you today?',
-    'DO NOT use the "பதில்:" prefix, DO NOT use the "விளக்கம்" section, DO NOT cite any verses, and ignore the references entirely when sending a greeting.',
-    '',
-    '## SOLOMON\'S FORTIFIED CITIES:',
-    'If the user asks about the cities Solomon built or fortified (like the "Big Three" or chariot/defense cities), you MUST prioritize listing Hazor, Megiddo, and Gezer (Hazor guarded the northern approach, Megiddo protected the Jezreel Valley pass, and Gezer defended the coastal plain and roads to Jerusalem) and cite 1 Kings 9:15-16, rather than only mentioning Bethhoron or Baalath.',
-    '',
-    '## TRIBE OF JOSEPH OVERSEER:',
-    'If the user asks who Solomon appointed as the overseer or in charge of the forced labor for the tribe of Joseph (or house of Joseph) during the Temple/Millo work, you MUST answer Jeroboam (son of Nebat) and cite 1 Kings 11:28. Do NOT say the biblical record does not specify an individual.',
-    '',
-    '## NORTHERN KINGDOM DYNASTIES:',
-    'If the user asks how many dynasties ruled in the Northern Kingdom (Israel) from 922 B.C. to 721 B.C., you MUST answer 9 dynasties (producing a total of 19 kings). List all 9 houses (Jeroboam, Baasha, Zimri, Omri, Jehu, Shallum, Menahem, Pekah, Hoshea) rather than just listing 5.',
-    '',
+    ...specialCaseInstructions,
     `Question: ${sanitizedQuestion}`
   ].join('\n');
 
   try {
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
-    const result = await model.generateContent(dynamicPrompt);
-    const responseText = result.response.text();
+    const result = await genAI.models.generateContent({
+      model: CHAT_MODEL_NAME,
+      contents: requestPrompt,
+      config: CHAT_GENERATION_CONFIG,
+    });
+    const responseText = result.text;
 
     let aiAnswer = stripEnglishParentheses(responseText);
     let finalAnswer = sanitizeCsiText(aiAnswer);

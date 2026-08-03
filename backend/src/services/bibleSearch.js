@@ -310,13 +310,13 @@ const BOOK_ABBREVIATIONS = {
  * Try to parse a query as a direct verse reference.
  * Returns matching verses or null if the query isn't a reference.
  */
-function parseDirectReference(verses, query) {
+function parseDirectReference(verses, query, bookNormCache) {
   const q = query.trim();
   const m = q.match(REF_PATTERN);
   if (!m) return null;
 
   let bookQuery = m[1].trim();
-  
+
   // Expand abbreviation if it exists
   for (const [abbr, full] of Object.entries(BOOK_ABBREVIATIONS)) {
     if (bookQuery === abbr || bookQuery === abbr + '.') {
@@ -324,18 +324,21 @@ function parseDirectReference(verses, query) {
       break;
     }
   }
-  
+
   bookQuery = normalize(bookQuery);
   const chapter = parseInt(m[2], 10);
   const startVerse = m[3] ? parseInt(m[3], 10) : null;
   const endVerse = m[4] ? parseInt(m[4], 10) : startVerse; // If no range, endVerse = startVerse
 
-  // Find matching book (fuzzy: normalize both sides)
+  // Find matching book (fuzzy: normalize both sides). bookNormCache holds
+  // normalize(book) precomputed once per unique book at index-build time,
+  // instead of recomputing it for every one of the ~35K verses on every
+  // reference-style query.
   const matchingVerses = verses.filter((v) => {
-    const bookNorm = normalize(v.book);
+    const bookNorm = bookNormCache ? bookNormCache.get(v.book) : normalize(v.book);
     if (!bookNorm.includes(bookQuery) && !bookQuery.includes(bookNorm)) return false;
     if (v.chapter !== chapter) return false;
-    
+
     if (startVerse !== null) {
       const vNum = parseInt(v.verse, 10);
       if (isNaN(vNum)) return false;
@@ -381,7 +384,41 @@ export function buildIndex(verses) {
     }
   }
 
-  return { index, df, verses, verseStemCache, verseNormCache, N: verses.length };
+  // Sorted once at load time so prefix lookups can binary-search instead of
+  // scanning every key in the vocabulary on every query.
+  const sortedKeys = Array.from(index.keys()).sort();
+
+  // normalize(book) precomputed once per unique book (not per verse), and a
+  // "book|chapter|verse" -> verse index map so curated-topic ref lookups
+  // don't have to linear-scan all verses (see Step 2.5 in searchBible).
+  const bookNormCache = new Map();
+  const refIndexMap = new Map();
+  for (let i = 0; i < verses.length; i++) {
+    const v = verses[i];
+    if (!bookNormCache.has(v.book)) bookNormCache.set(v.book, normalize(v.book));
+    const refKey = `${v.book}|${v.chapter}|${v.verse}`;
+    if (!refIndexMap.has(refKey)) refIndexMap.set(refKey, i);
+  }
+
+  return { index, df, verses, verseStemCache, verseNormCache, sortedKeys, bookNormCache, refIndexMap, N: verses.length };
+}
+
+/**
+ * Return all keys in `sortedKeys` that start with `prefix`, via binary search
+ * for the start of the range instead of scanning the whole array.
+ */
+function findKeysWithPrefix(sortedKeys, prefix) {
+  let lo = 0, hi = sortedKeys.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (sortedKeys[mid] < prefix) lo = mid + 1;
+    else hi = mid;
+  }
+  const matches = [];
+  for (let i = lo; i < sortedKeys.length && sortedKeys[i].startsWith(prefix); i++) {
+    matches.push(sortedKeys[i]);
+  }
+  return matches;
 }
 
 // ─── TF-IDF Scoring ─────────────────────────────────────────────────────────
@@ -482,10 +519,10 @@ function scoreVerse(verseIdx, queryStems, queryBigrams, normQuery, bibleIndex) {
 export function searchBible(bibleIndex, query, maxResults = 12, bookFilter = 'all') {
   if (!query || !query.trim() || !bibleIndex) return [];
 
-  const { index, verses } = bibleIndex;
+  const { index, verses, sortedKeys, bookNormCache, refIndexMap } = bibleIndex;
 
   // ── Step 1: Direct reference check ──
-  const directMatch = parseDirectReference(verses, query.trim());
+  const directMatch = parseDirectReference(verses, query.trim(), bookNormCache);
   if (directMatch) return directMatch.slice(0, maxResults);
 
   // ── Step 2: Expand query with thematic synonyms ──
@@ -532,8 +569,8 @@ export function searchBible(bibleIndex, query, maxResults = 12, bookFilter = 'al
       for (const r of curated.refs) {
         const [book, cv] = r.split(' ');
         const [c, v] = cv.split(':');
-        const matchIdx = verses.findIndex(x => x.book === book && String(x.chapter) === c && String(x.verse) === v);
-        if (matchIdx !== -1) {
+        const matchIdx = refIndexMap.get(`${book}|${c}|${v}`);
+        if (matchIdx !== undefined) {
           curatedBonus.set(matchIdx, 1000); // Massive bonus to ensure top ranking
         }
       }
@@ -554,12 +591,15 @@ export function searchBible(bibleIndex, query, maxResults = 12, bookFilter = 'al
     if (posting) {
       for (const idx of posting) candidateSet.add(idx);
     }
-    // Also check prefix matches for short stems
+    // Also check prefix matches for short stems (both directions: keys that
+    // extend the stem, and shorter keys the stem itself extends).
     if (stem.length >= 3) {
-      for (const [key, posting2] of index) {
-        if (key.length >= 3 && (key.startsWith(stem) || stem.startsWith(key))) {
-          for (const idx of posting2) candidateSet.add(idx);
-        }
+      for (const key of findKeysWithPrefix(sortedKeys, stem)) {
+        for (const idx of index.get(key)) candidateSet.add(idx);
+      }
+      for (let len = 3; len < stem.length; len++) {
+        const posting2 = index.get(stem.slice(0, len));
+        if (posting2) for (const idx of posting2) candidateSet.add(idx);
       }
     }
   }

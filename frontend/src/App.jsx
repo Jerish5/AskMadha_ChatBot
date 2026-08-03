@@ -2,6 +2,8 @@ import { useState, useRef, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { Send, Book, BookOpen } from 'lucide-react';
 
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+
 const formatBookName = (book) => {
   if (!book) return '';
   const isTamil = /[\u0B80-\u0BFF]/.test(book);
@@ -54,7 +56,7 @@ function App() {
     setIsLoading(true);
 
     try {
-      const response = await fetch('http://localhost:3001/api/chat', {
+      const response = await fetch(`${API_BASE_URL}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: userMessage.text, languagePreference })
@@ -133,12 +135,11 @@ function App() {
                 ) : (
                   msg.text
                 )}
-              </div>
-              
-              {msg.sources && msg.sources.length > 0 && (
+
+                {msg.sources && msg.sources.length > 0 && (
                 <div className="sources-container">
                   <div className="sources-title">
-                    <Book size={14} /> {msg.text && /[\u0B80-\u0BFF]/.test(msg.text) ? 'ஆதார விவிலிய குறிப்புகள்:' : 'Biblical References'}
+                    {msg.text && /[\u0B80-\u0BFF]/.test(msg.text) ? 'ஆதார விவிலிய குறிப்புகள்:' : 'BIBLICAL REFERENCES:'}
                   </div>
                   {msg.sources.map((source, i) => (
                     <div key={i} className="source-item">
@@ -148,6 +149,7 @@ function App() {
                   ))}
                 </div>
               )}
+              </div>
             </div>
           ))
         )}

@@ -1,14 +1,15 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { ENGLISH_GREETINGS } from './greetings.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 dotenv.config({ path: path.join(__dirname, '../../.env') });
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 export const stopWords = new Set([
   "a", "an", "the",
@@ -70,7 +71,24 @@ export function buildEnglishIndex(bible) {
     }
     return words;
   });
-  return { bible, wordDocFreq, verseWords, total: bible.length };
+
+  // Precomputed once at load time so per-citation lookups (server.js's LLM-ref
+  // matching, extractEnglishVersesFromText) don't have to scan all ~30K
+  // verses each time. Keyed on parseInt(verse) so the handful of verses with
+  // non-numeric labels (e.g. Daniel 3's "24/91", Tobit's "3, 4") are found by
+  // their leading verse number — matching how ranges are already resolved
+  // elsewhere in this file.
+  const uniqueBooks = Array.from(new Set(bible.map(v => v.book)));
+  const verseByRef = new Map();
+  for (const v of bible) {
+    const vNum = parseInt(v.verse, 10);
+    if (isNaN(vNum)) continue;
+    const key = `${v.book}|${v.chapter}|${vNum}`;
+    if (!verseByRef.has(key)) verseByRef.set(key, []);
+    verseByRef.get(key).push(v);
+  }
+
+  return { bible, wordDocFreq, verseWords, uniqueBooks, verseByRef, total: bible.length };
 }
 
 function getIDF(wordDocFreq, total, word) {
@@ -149,13 +167,44 @@ function containsTamilScript(text) {
   return /[஀-௿]/.test(text);
 }
 
+const ENGLISH_HINT_RE = /^[a-z0-9\s.,!?'"()\-:;]+$/i;
+
+// Cheap local check so an obviously-English "auto" query doesn't need a
+// full LLM round-trip just to rule out Tanglish. Requires several distinct
+// English function-word hits (reusing the stopWords list above), not just
+// one, in case a transliterated Tamil word happens to collide with a short
+// stopword — anything less certain still falls through to the LLM call
+// below, so this can only skip the call, never mis-skip the translation.
+function looksLikeEnglish(query) {
+  const trimmed = query.trim();
+  if (!ENGLISH_HINT_RE.test(trimmed)) return false;
+
+  const tokens = trimmed.toLowerCase().split(/\W+/).filter(Boolean);
+  if (tokens.length < 3) return false;
+
+  const stopwordHits = tokens.filter(t => stopWords.has(t)).length;
+  return stopwordHits >= 2 && stopwordHits / tokens.length >= 0.2;
+}
+
+const LANGUAGE_DETECTION_MODEL = 'gemini-2.5-flash';
+const LANGUAGE_DETECTION_CONFIG = { responseMimeType: 'application/json', thinkingConfig: { thinkingBudget: 0 } };
+
 export async function detectLanguage(query, languagePreference = 'auto') {
+  // An explicit "English Only" preference always wins, even if the user
+  // pastes/types Tamil script — the user expects an English answer
+  // regardless of the language they typed the question in. (The English
+  // pipeline understands the question either way; generateEnglishResponse
+  // is told to always answer in English.)
   if (languagePreference === 'english') {
     return { lang: 'english', query };
   }
 
   if (containsTamilScript(query)) {
     return { lang: 'tamil', query };
+  }
+
+  if (languagePreference !== 'tamil' && looksLikeEnglish(query)) {
+    return { lang: 'english', query };
   }
 
   let prompt = `Analyze the following text: "${query}"
@@ -174,16 +223,25 @@ Return ONLY valid JSON.`;
   }
 
   try {
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash', generationConfig: { responseMimeType: 'application/json' } });
-    const result = await model.generateContent(prompt);
-    const data = JSON.parse(result.response.text());
+    const result = await genAI.models.generateContent({
+      model: LANGUAGE_DETECTION_MODEL,
+      contents: prompt,
+      config: LANGUAGE_DETECTION_CONFIG,
+    });
+    const data = JSON.parse(result.text);
     console.log(`Language detected: ${data.lang}`);
     return { lang: data.lang || 'english', query: data.query || query };
   } catch (e) {
     console.error('Language detection error:', e.message);
-    return { lang: 'english', query };
+    // Fall back to the user's explicit preference rather than always
+    // defaulting to English — a failed translation call shouldn't silently
+    // override someone who selected "Tamil Only".
+    return { lang: languagePreference === 'tamil' ? 'tamil' : 'english', query };
   }
 }
+
+const REFERENCE_FINDER_MODEL = 'gemini-2.5-flash';
+const REFERENCE_FINDER_CONFIG = { responseMimeType: 'application/json', thinkingConfig: { thinkingBudget: 0 } };
 
 export async function findReferencesWithLLM(query) {
   const prompt = `You are a Bible reference finder.
@@ -197,9 +255,12 @@ If no verses match, return [].
 Example: [{"book": "DEUTERONOMY", "chapter": 19, "verse": "15"}]`;
 
   try {
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash', generationConfig: { responseMimeType: 'application/json' } });
-    const result = await model.generateContent(prompt);
-    return JSON.parse(result.response.text());
+    const result = await genAI.models.generateContent({
+      model: REFERENCE_FINDER_MODEL,
+      contents: prompt,
+      config: REFERENCE_FINDER_CONFIG,
+    });
+    return JSON.parse(result.text);
   } catch (err) {
     console.error('LLM reference retrieval error:', err.message);
     return [];
@@ -227,8 +288,8 @@ Example: [{"book": "DEUTERONOMY", "chapter": 19, "verse": "15"}]`;
 
 export function extractEnglishVersesFromText(text, englishIndex) {
   if (!text || !englishIndex || !englishIndex.bible) return [];
-  
-  const uniqueBooks = Array.from(new Set(englishIndex.bible.map(v => v.book)));
+
+  const uniqueBooks = englishIndex.uniqueBooks;
   const regex = /((?:[1-3]\s+)?[A-Za-z]+(?:\s+[A-Za-z]+)?)\s+(\d+):\s*(\d+)(?:\s*-\s*(\d+))?/gi;
   const matches = [...text.matchAll(regex)];
   
@@ -253,69 +314,98 @@ export function extractEnglishVersesFromText(text, englishIndex) {
     }
     
     if (!fullBook) continue;
-    
-    const matchingVerses = englishIndex.bible.filter(v => {
-      if (v.book !== fullBook) return false;
-      if (v.chapter !== chapter) return false;
-      const vNum = parseInt(v.verse, 10);
-      if (isNaN(vNum)) return false;
-      return vNum >= startVerse && vNum <= endVerse;
-    });
-    
-    for (const v of matchingVerses) {
-      const vId = `${v.book}_${v.chapter}_${v.verse}`;
-      if (!seenRefs.has(vId)) {
-        seenRefs.add(vId);
-        extracted.push(v);
+
+    for (let vNum = startVerse; vNum <= endVerse; vNum++) {
+      const matchingVerses = englishIndex.verseByRef.get(`${fullBook}|${chapter}|${vNum}`);
+      if (!matchingVerses) continue;
+      for (const v of matchingVerses) {
+        const vId = `${v.book}_${v.chapter}_${v.verse}`;
+        if (!seenRefs.has(vId)) {
+          seenRefs.add(vId);
+          extracted.push(v);
+        }
       }
     }
   }
-  
+
   return extracted;
 }
+
+// ─── Conditional Special-Case Instructions ──────────────────────────────────
+// These hardcoded overrides correct specific known-wrong answers, but must
+// only be injected when the query is actually about that topic. Including
+// them unconditionally on every request was found to occasionally derail the
+// model into answering one of these canned topics instead of the user's
+// actual (unrelated) question, especially when retrieved verses were weak.
+function mentionsSolomonCities(q) {
+  // Bare "\bcit(y|ies)\b" was dropped: too generic on its own — it matched any
+  // "how many cities did Solomon build" question, not only the fortified/
+  // defense-city one this override targets.
+  return /solomon/i.test(q) && /fortif|chariot\s*cit|store\s*cit|defense\s*cit|garrison|hazor|megiddo|gezer/i.test(q);
+}
+function mentionsJosephOverseer(q) {
+  // Bare "temple" was dropped — it alone made this misfire on any Joseph
+  // question that happens to mention a temple (verified against "Did Joseph
+  // visit a temple in Egypt as a young man?"), unrelated to the Solomon-era
+  // forced-labor overseer this override targets.
+  return /joseph/i.test(q) && /overseer|forced\s*labor|forced\s*labour|conscript|levy|millo/i.test(q);
+}
+function mentionsNorthernKingdomDynasties(q) {
+  // The bare "how many kings/houses" trigger was dropped — paired with just
+  // "israel" it matched any "how many kings did Israel have" question, not
+  // only ones about the post-split Northern Kingdom specifically.
+  return /northern\s*kingdom|israel/i.test(q) && /northern|dynast/i.test(q);
+}
+
+// ─── Static English Response Prompt ─────────────────────────────────────────
+// Built once at module load — never recreated per message — and sent as the
+// model's systemInstruction rather than re-concatenated into every prompt.
+const ENGLISH_SYSTEM_INSTRUCTION = `You are Ask Madha, an expert, precise Roman Catholic Bible Chatbot. The user will send a question or a fill-in-the-blank phrase, together with the most relevant verses found from the English Bible text as context.
+
+LANGUAGE RULE: You MUST respond ENTIRELY in English, regardless of what language or script the user's question is written in (Tamil, Tanglish, or otherwise). If the question is not in English, understand its meaning first, then write your entire answer in English — do not switch to the input's language.
+
+CRITICAL INSTRUCTIONS:
+1. PRIMARY SOURCE & FALLBACK: Attempt to base your answers on the provided context verses. If they do not contain the answer or are completely irrelevant, silently fall back to your comprehensive general biblical knowledge and answer accurately, providing correct biblical citations from memory. NEVER tell the user the verses were insufficient or missing — do NOT use phrases like "The provided verses do not mention", "The text doesn't say", "Based on the provided context", or "According to the provided text". Your user does not know you are being provided with context verses at all. Act as an omniscient Bible scholar and give the answer directly.
+2. FILL-IN-THE-BLANK QUESTIONS: If the user's input contains blanks (like _______), find the specific verse in the context that matches the text before/after the blanks. The blank phrase might be a paraphrase or come from a different Bible translation (such as NIV) than the provided ESV text (e.g., "Any one hung on a tree is under God's curse" is the NIV translation corresponding to Deuteronomy 21:23, where ESV says "a hanged man is cursed by God"). In such cases, identify the correct verse by its meaning and theology, fill in the blank exactly as the text appears in that matching verse (or the standard translation it's drawn from, if it differs from ESV), and cite it per the CITATIONS rule below.
+3. DEPTH OF EXPLANATION: You are REQUIRED to use your broader biblical knowledge to provide a highly detailed, comprehensive explanation of meanings, historical context, and theological concepts. When discussing feasts, offerings, characters, or practices, you MUST include deep historical background, Hebrew names (if applicable), dates/timing, alternative names, and their deep theological significance. When discussing events, tribes, or locations, you MUST connect them to related historical events (e.g., later migrations, outcomes, related prophecies) across the Bible to provide a complete picture.
+4. CITATIONS: Always convert full book names into standard 3-4 letter English abbreviations (e.g., use 'Deut 2:5' instead of 'Deuteronomy 2:5', use 'Lev 25' instead of 'Leviticus 25'). NEVER use the full book name in citations.
+5. RESPONSE STRUCTURE: Follow this exact structure for every substantive answer — the only exceptions are greetings and off-topic replies (below), which must NOT use it:
+ANSWER: [Answer the question directly and concisely in a single sentence. If the question asks why an event happened and a context verse gives the direct biblical explanation, prioritize that verse's own phrasing, and do NOT repeat or paraphrase the question itself (e.g., do NOT start with "God forbade Moses because..." or "Moses was forbidden to enter the Promised Land because..."). Jump straight to the direct biblical statement — e.g., answer "Why did God forbid Moses to enter the Promised Land?" with "Moses broke faith with God in the midst of the people of Israel at the waters of Meribah-kadesh, in the wilderness of Zin (Deut 32:51)."]
+
+EXPLANATION: [Your highly detailed explanation here, per DEPTH OF EXPLANATION above.]
+
+Biblical References:
+[List comprehensive Bible references related to the topic at the end]
+
+6. ENUMERATION RULE: If the user asks to list, enumerate, or describe multiple items, you MUST explicitly number them in your response (e.g., 1) Item One, 2) Item Two) and ensure you capture ALL items mentioned in the relevant text. Be thorough so you do not miss any items (e.g., if listing offerings in Leviticus 1-6, include all 5: Burnt, Grain/Cereal, Peace, Sin, and Guilt Offerings).
+
+7. OFF-TOPIC RULE: If the user asks a question that is completely unrelated to the Bible, Christianity, or the Catholic faith (e.g., asking about cars, programming, movies, science fiction, math), you MUST NOT attempt to answer it using the Bible or force a biblical connection. Instead, politely reply ENTIRELY in English, stating that you are a Catholic Bible Assistant and can only answer questions related to the Holy Bible and Catholic teachings. DO NOT provide any verses or explanations, and DO NOT use the "ANSWER:" or "EXPLANATION:" formatting for these off-topic queries.
+
+8. GREETINGS & CASUAL CHAT: This applies ONLY when the user's entire message is a greeting or small talk with no substantive question attached (e.g. "hi", "hello", or "how are you"). If a real question is mixed in with the greeting, ignore the greeting and answer the question normally using the RESPONSE STRUCTURE above. Otherwise, reply with one of the following pre-defined greetings:
+${ENGLISH_GREETINGS.map(g => `- ${g}`).join('\n')}
+DO NOT use the "ANSWER:" prefix, DO NOT use the "EXPLANATION:" section, DO NOT cite any verses, and ignore the references entirely when sending a greeting.
+
+9. NUMBER FORMATTING RULE: You MUST strictly use numeric digits for all numbers (e.g., "40 Years", "5th", "20 days") instead of writing them out as words (e.g., NEVER use "forty years", "fifth", or "twenty days"). This is a strict requirement.`;
 
 export async function generateEnglishResponse(query, relevantVerses) {
   let contextText = relevantVerses.map(v => `${v.book} ${v.chapter}:${v.verse} - "${v.text}"`).join('\n');
   if (relevantVerses.length === 0) contextText = 'No direct verses found matching the keywords.';
 
-  const prompt = `You are an expert, precise Bible Chatbot.
-The user asked a question or provided a fill-in-the-blank phrase, and I have found the following most relevant verses from the english Bible text provided by the user:
+  const specialCaseInstructions = [];
+  if (mentionsSolomonCities(query)) {
+    specialCaseInstructions.push(`10. SOLOMON'S FORTIFIED CITIES: If the user asks about the cities Solomon built or fortified (like the "Big Three" or chariot/defense cities), you MUST prioritize listing Hazor, Megiddo, and Gezer (Hazor guarded the northern approach, Megiddo protected the Jezreel Valley pass, and Gezer defended the coastal plain and roads to Jerusalem) and cite 1 Kings 9:15-16, rather than only mentioning Bethhoron or Baalath.`);
+  }
+  if (mentionsJosephOverseer(query)) {
+    specialCaseInstructions.push(`11. TRIBE OF JOSEPH OVERSEER: If the user asks who Solomon appointed as the overseer or in charge of the forced labor for the tribe of Joseph (or house of Joseph) during the Temple/Millo work, you MUST answer Jeroboam (son of Nebat) and cite 1 Kings 11:28. Do NOT say the biblical record does not specify an individual.`);
+  }
+  if (mentionsNorthernKingdomDynasties(query)) {
+    specialCaseInstructions.push(`12. NORTHERN KINGDOM DYNASTIES: If the user asks how many dynasties ruled in the Northern Kingdom (Israel) from 922 B.C. to 721 B.C., you MUST answer 9 dynasties (producing a total of 19 kings). List all 9 houses (Jeroboam, Baasha, Zimri, Omri, Jehu, Shallum, Menahem, Pekah, Hoshea) rather than just listing 5.`);
+  }
 
+  const requestPrompt = `Bible verses found for this query:
 ${contextText}
 
-User's input: ${query}
-
-CRITICAL INSTRUCTIONS:
-1. Primary Source & Fallback: Attempt to base your answers on the provided context verses. HOWEVER, if the provided verses do not contain the answer or are completely irrelevant, YOU MUST NEVER mention that the verses lack the information. Completely ignore the context verses and rely ENTIRELY on your comprehensive general biblical knowledge to answer the question accurately, providing correct biblical citations from memory.
-2. If the user's input contains blanks (like _______), you MUST find the specific verse in the context that matches the text before/after the blanks. Note that the blank phrase might be a paraphrase or come from a different Bible translation (such as NIV) than the provided ESV text (e.g., "Any one hung on a tree is under God's curse" is the NIV translation corresponding to Deuteronomy 21:23, where ESV says "a hanged man is cursed by God"). In such cases, identify the correct verse by its meaning and theology, fill in the blank to match the expected biblical completion, and cite the correct verse.
-3. Fill in the blanks exactly as the text appears in the matching verse (or standard translation representing the blank if it differs from ESV), and explicitly cite the verse using standard English abbreviations (e.g., "Deut 21:23").
-4. DEPTH OF EXPLANATION: You are REQUIRED to use your broader biblical knowledge to provide a highly detailed, comprehensive explanation of meanings, historical context, and theological concepts. When discussing feasts, offerings, characters, or practices, you MUST include deep historical background, Hebrew names (if applicable), dates/timing, alternative names, and their deep theological significance. When discussing events, tribes, or locations, you MUST connect them to related historical events (e.g., later migrations, outcomes, related prophecies) across the Bible to provide a complete picture.
-5. FORMATTING: First, answer the question directly and concisely in a single sentence. If the question asks why an event happened and there is a verse in the context that gives the direct biblical explanation, you MUST prioritize using the phrasing of that specific verse in your first sentence, and you MUST NOT repeat or paraphrase the question in your first sentence (e.g., do NOT start with "God forbade Moses because..." or "Moses was forbidden to enter the Promised Land because..."). Jump straight to the direct biblical statement (e.g., answering "Why did God forbid Moses to enter the Promised Land?" with "Moses broke faith with God in the midst of the people of Israel at the waters of Meribah-kadesh, in the wilderness of Zin (Deut 32:51)"). Then, if needed, you may provide a brief explanation based on the user's question. NEVER mention the context or verses provided to you. You MUST NEVER use phrases like "The provided verses do not mention", "The text doesn't say", "Based on the provided context", or "According to the provided text". Your user does not know you are being provided with context verses. Act as an omniscient Bible scholar and give the answer directly.
-6. ABBREVIATE CITATIONS: When displaying Bible references in your answer, you MUST convert full book names into standard 3-4 letter English abbreviations (e.g., use 'Deut 2:5' instead of 'Deuteronomy 2:5', use 'Lev 25' instead of 'Leviticus 25'). NEVER use the full book name in citations.
-7. STRUCTURE RULE: Mostly follow this exact response structure for your answers:
-ANSWER: [Your concise answer here]
-
-EXPLANATION: [Your highly detailed explanation here. Include deep historical and theological context, Hebrew names, dates, and significance.]
-
-Biblical References:
-[List comprehensive Bible references related to the topic at the end]
-
-8. ENUMERATION RULE: If the user asks to list, enumerate, or describe multiple items, you MUST explicitly number them in your response (e.g., 1) Item One, 2) Item Two) and ensure you capture ALL items mentioned in the relevant text. Be thorough so you do not miss any items (e.g., if listing offerings in Leviticus 1-6, include all 5: Burnt, Grain/Cereal, Peace, Sin, and Guilt Offerings).
-
-9. OFF-TOPIC RULE: If the user asks a question that is completely unrelated to the Bible, Christianity, or the Catholic faith (e.g., asking about cars, programming, movies, science fiction, math), you MUST NOT attempt to answer it using the Bible or force a biblical connection. Instead, politely reply ENTIRELY in English, stating that you are a Catholic Bible Assistant and can only answer questions related to the Holy Bible and Catholic teachings. DO NOT provide any verses or explanations, and DO NOT use the "ANSWER:" or "EXPLANATION:" formatting for these off-topic queries.
-
-10. GREETINGS & CASUAL CHAT: If the user simply says a greeting like "hi", "hello", or asks "how are you", reply with one of the following pre-defined greetings:
-- 🙏 Welcome! I'm the Ask Madha Bible Assistant, here to help you explore the Roman Catholic Bible. Ask me about Bible verses, topics, prayers, or Catholic teachings. How may I assist you today?
-- 🙏 Peace be with you! I'm your Roman Catholic Bible Assistant, ready to help you find Bible verses, understand Scripture, and learn more about the Catholic faith. What would you like to explore today?
-- 😊 Hello! Welcome to Ask Madha Bible Assistant. I'm here to help you discover the Word of God through the Roman Catholic Bible. What Bible verse or topic are you looking for today?
-- 🙏 Welcome! Ask me anything about the Roman Catholic Bible, Bible verses, saints, prayers, or Catholic teachings. I'm here to help with your spiritual journey.
-- 😊 Hello! I'm the Ask Madha Bible Assistant, ready to answer your questions about the Holy Bible and the Catholic faith. How can I help you today?
-DO NOT use the "ANSWER:" prefix, DO NOT use the "EXPLANATION:" section, DO NOT cite any verses, and ignore the references entirely when sending a greeting.
-
-11. NUMBER FORMATTING RULE: You MUST strictly use numeric digits for all numbers (e.g., "40 Years", "5th", "20 days") instead of writing them out as words (e.g., NEVER use "forty years", "fifth", or "twenty days"). This is a strict requirement.
-12. SOLOMON'S FORTIFIED CITIES: If the user asks about the cities Solomon built or fortified (like the "Big Three" or chariot/defense cities), you MUST prioritize listing Hazor, Megiddo, and Gezer (Hazor guarded the northern approach, Megiddo protected the Jezreel Valley pass, and Gezer defended the coastal plain and roads to Jerusalem) and cite 1 Kings 9:15-16, rather than only mentioning Bethhoron or Baalath.
-13. TRIBE OF JOSEPH OVERSEER: If the user asks who Solomon appointed as the overseer or in charge of the forced labor for the tribe of Joseph (or house of Joseph) during the Temple/Millo work, you MUST answer Jeroboam (son of Nebat) and cite 1 Kings 11:28. Do NOT say the biblical record does not specify an individual.
-14. NORTHERN KINGDOM DYNASTIES: If the user asks how many dynasties ruled in the Northern Kingdom (Israel) from 922 B.C. to 721 B.C., you MUST answer 9 dynasties (producing a total of 19 kings). List all 9 houses (Jeroboam, Baasha, Zimri, Omri, Jehu, Shallum, Menahem, Pekah, Hoshea) rather than just listing 5.`;
+User's input: ${query}${specialCaseInstructions.length ? '\n\n' + specialCaseInstructions.join('\n') : ''}`;
 
   const models = ['gemini-2.5-flash'];
   let lastError = null;
@@ -324,9 +414,12 @@ DO NOT use the "ANSWER:" prefix, DO NOT use the "EXPLANATION:" section, DO NOT c
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
         console.log(`Trying ${modelName} (attempt ${attempt})...`);
-        const model = genAI.getGenerativeModel({ model: modelName });
-        const result = await model.generateContent(prompt);
-        const responseText = result.response.text();
+        const result = await genAI.models.generateContent({
+          model: modelName,
+          contents: requestPrompt,
+          config: { systemInstruction: ENGLISH_SYSTEM_INSTRUCTION },
+        });
+        const responseText = result.text;
 
         const ansLower = responseText.toLowerCase();
         const sources = relevantVerses.filter(v => {

@@ -191,42 +191,31 @@ h1, h2, h3 {
 .message-bubble strong { color: #f8fafc; }
 .message-bubble ul, .message-bubble ol { margin-left: 1.5rem; margin-bottom: 0.75rem; }
 
-/* Sources styling */
+/* Sources — reuses the answer's own paragraph rhythm (same margin as
+   .message-bubble p) so it reads as a continuation of the message, not a
+   separate section. No divider, no distinct background. */
 .sources-container {
-  margin-top: 0.5rem;
-  padding: 0.75rem;
-  background: rgba(0, 0, 0, 0.2);
-  border-radius: 0.75rem;
-  font-size: 0.85rem;
-  color: var(--text-muted);
+  margin-top: 0.75rem;
+  line-height: 1.6;
 }
 
 .sources-title {
-  font-size: 0.75rem;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  margin-bottom: 0.5rem;
-  color: #a78bfa;
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
+  font-weight: 600;
+  color: #f8fafc;
+  margin-bottom: 0.75rem;
 }
 
 .source-item {
-  margin-bottom: 0.5rem;
-  border-left: 2px solid var(--border-color);
-  padding-left: 0.5rem;
+  margin-bottom: 0.75rem;
 }
 .source-item:last-child {
   margin-bottom: 0;
 }
 .source-ref {
   font-weight: 600;
-  color: #e2e8f0;
 }
 .source-text {
-  font-style: italic;
-  opacity: 0.8;
+  opacity: 0.85;
 }
 
 /* Input Area */
