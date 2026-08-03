@@ -1,24 +1,26 @@
-# Bible Bot v7
+# Ask Madha
 
-An AI-powered bilingual Bible Chatbot that allows users to query and search both English and Tamil Bible texts. It uses the Google Gemini API for intelligent semantic search, language detection, and response generation, returning accurate answers with biblical references.
+An AI-powered bilingual Roman Catholic Bible Chatbot that allows users to query and search both English and Tamil Bible texts. It uses the Google Gemini API for intelligent semantic search, language detection, and response generation, returning accurate answers with biblical references.
 
 ## Project Structure
 
 ```
-bible_bot_v7/
+AskMadha_ChatBot/
 ├── backend/                        # Unified Bible API (port 3001)
 │   ├── server.js                   # Express server — loads both bibles, routes by language
-│   ├── .env                        # Gemini API key
+│   ├── .env                        # Gemini API key (not committed — see Environment Variables)
 │   ├── package.json
 │   └── src/services/
 │       ├── englishSearch.js        # English search, language detection, LLM reference finder
 │       ├── bibleSearch.js          # Tamil TF-IDF search engine
-│       └── chatService.js          # Tamil Gemini response generator (RC terminology)
+│       ├── chatService.js          # Tamil Gemini response generator (RC terminology)
+│       └── greetings.js            # Shared greeting pool + greeting-only short-circuit
 ├── data/
-│   ├── english_bible/
-│   │   └── English_bible_full.json
-│   └── tamil_bible/
-│       └── tamil_bible_full.json
+│   └── bible-datasets/
+│       ├── english_bible/
+│       │   └── English_bible_full.json
+│       └── tamil_bible/
+│           └── tamil_bible_full.json
 ├── frontend/                       # React + Vite UI (port 5173)
 └── start.bat                       # One-click launcher for Windows
 ```
@@ -50,7 +52,7 @@ npm install
 
 ## Environment Variables
 
-The `backend/.env` file is already included. If you need to replace the API key:
+Create a `backend/.env` file (it's gitignored, so it won't be committed):
 
 ```env
 GEMINI_API_KEY=your_gemini_api_key_here
@@ -78,6 +80,6 @@ Open your browser at **http://localhost:5173** to use the chatbot.
 
 - **Backend**: Node.js, Express.js (ESM)
 - **Frontend**: React, Vite
-- **AI**: Google Gemini API — `gemini-2.5-flash` (`@google/generative-ai`)
+- **AI**: Google Gemini API — `gemini-2.5-flash` (`@google/genai`)
 - **Tamil Search**: Custom TF-IDF engine with morphological suffix stripping, bigram matching, thematic keyword expansion
 - **English Search**: IDF-weighted keyword scoring with context smoothing and synonym expansion
