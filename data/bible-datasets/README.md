@@ -7,7 +7,7 @@ Structured, verse-level Bible text in JSON format for English and Tamil.
 | File | Language | Verses | Books |
 |---|---|---|---|
 | [`english_bible/English_bible_full.json`](english_bible/English_bible_full.json) | English | 35,453 | 73 |
-| [`tamil_bible/tamil_bible_full.json`](tamil_bible/tamil_bible_full.json) | Tamil | 36,097 | 74 |
+| [`tamil_bible/tamil_bible_full.json`](tamil_bible/tamil_bible_full.json) | Tamil | 35,677 | 73 |
 
 ## Format
 
@@ -30,4 +30,4 @@ Each file is a JSON array of verse objects:
 ## Notes
 
 - The English dataset includes deuterocanonical books (Tobit, Judith, 1–2 Maccabees, Baruch).
-- Book naming and verse counts differ slightly between the two datasets (73 vs. 74 books), so they are not guaranteed to be 1:1 aligned by book/chapter/verse — treat each as an independent source rather than a parallel corpus.
+- Both datasets now have 73 books, but book order differs structurally: English interleaves the deuterocanonical books within the Old Testament (e.g. Tobit/Judith before Esther, Maccabees after), while Tamil groups all of its deuterocanonical books together at the very end, after Revelation. Verse text is also not guaranteed to be 1:1 aligned by chapter/verse across languages (translations may split or condense verses differently) — treat each as an independent source rather than a parallel corpus.
