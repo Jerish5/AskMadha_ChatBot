@@ -243,9 +243,10 @@ Return ONLY valid JSON.`;
 const REFERENCE_FINDER_MODEL = 'gemini-2.5-flash';
 const REFERENCE_FINDER_CONFIG = { responseMimeType: 'application/json', thinkingConfig: { thinkingBudget: 0 } };
 
-export async function findReferencesWithLLM(query) {
+export async function findReferencesWithLLM(query, history = []) {
+  const historyText = formatHistory(history);
   const prompt = `You are a Bible reference finder.
-User query: "${query}"
+${historyText ? `Recent conversation (use it to resolve follow-ups like "tell me more about him"):\n${historyText}\n\n` : ''}User query: "${query}"
 
 INSTRUCTIONS:
 1. Find the most relevant Bible verses that answer the query or match the statement (up to 5).
@@ -265,14 +266,24 @@ Example: [{"book": "DEUTERONOMY", "chapter": 19, "verse": "15"}]`;
     console.error('LLM reference retrieval error:', err.message);
     return [];
   }
-}const englishAbbrMap = {
+}
+
+// Keys are upper-case, period-free, with a single space after a leading book
+// number (see normalizeBookKey). Full names that are a prefix of their
+// dataset name (e.g. "PSALM", "1 JOHN") don't need an entry — resolveEnglishBook
+// falls back to a prefix match against the dataset's book list.
+const englishAbbrMap = {
   "GEN": "GENESIS", "EX": "EXODUS", "EXOD": "EXODUS", "LEV": "LEVITICUS", "NUM": "NUMBERS", 
   "DEUT": "DEUTERONOMY", "JOSH": "JOSHUA", "JUDG": "JUDGES", "RUTH": "RUTH", 
   "1 SAM": "1SAMUEL", "2 SAM": "2SAMUEL", "1 KGS": "1KINGS", "2 KGS": "2KINGS", 
   "1 KIN": "1KINGS", "2 KIN": "2KINGS", "1 CHR": "1CHRONICLES", "2 CHR": "2CHRONICLES",
   "1 CHRON": "1CHRONICLES", "2 CHRON": "2CHRONICLES", "EZRA": "EZRA", "NEH": "NEHEMIAH",
-  "ESTH": "ESTHER", "JOB": "JOB", "PS": "PSALMS", "PSA": "PSALMS", "PROV": "PROVERBS",
-  "ECCL": "ECCLESIASTES", "SONG": "THESONGOFSOLOMON", "CANT": "THESONGOFSOLOMON",
+  "TOB": "TOBIT", "JDT": "JUDITH", "JDTH": "JUDITH",
+  "ESTH": "ESTHER", "1 MACC": "1MACCABEES", "2 MACC": "2MACCABEES", "1 MAC": "1MACCABEES", "2 MAC": "2MACCABEES",
+  "JOB": "JOB", "PS": "PSALMS", "PSA": "PSALMS", "PROV": "PROVERBS",
+  "ECCL": "ECCLESIASTES", "QOH": "ECCLESIASTES", "SONG": "THESONGOFSOLOMON", "CANT": "THESONGOFSOLOMON",
+  "SONG OF SOLOMON": "THESONGOFSOLOMON", "SONG OF SONGS": "THESONGOFSOLOMON",
+  "WIS": "WISDOMOFSOLOMON", "WISDOM": "WISDOMOFSOLOMON", "SIR": "SIRACH", "ECCLUS": "SIRACH", "BAR": "BARUCH",
   "ISA": "ISAIAH", "JER": "JEREMIAH", "LAM": "LAMENTATIONS", "EZEK": "EZEKIEL",
   "DAN": "DANIEL", "HOS": "HOSEA", "JOEL": "JOEL", "AMOS": "AMOS", "OBAD": "OBADIAH",
   "JONAH": "JONAH", "MIC": "MICAH", "NAH": "NAHUM", "HAB": "HABAKKUK", "ZEPH": "ZEPHANIAH",
@@ -281,42 +292,75 @@ Example: [{"book": "DEUTERONOMY", "chapter": 19, "verse": "15"}]`;
   "JN": "JOHN", "ACTS": "ACTS", "ROM": "ROMANS", "1 COR": "1CORINTHIANS", "2 COR": "2CORINTHIANS",
   "GAL": "GALATIANS", "EPH": "EPHESIANS", "PHIL": "PHILIPPIANS", "COL": "COLOSSIANS",
   "1 THESS": "1THESSALONIANS", "2 THESS": "2THESSALONIANS", "1 TIM": "1TIMOTHY",
-  "2 TIM": "2TIMOTHY", "TITUS": "TITUS", "PHILEM": "PHILEMON", "HEB": "HEBREWS",
+  "2 TIM": "2TIMOTHY", "TITUS": "TITUS", "PHILEM": "PHILEMON", "PHLM": "PHILEMON", "HEB": "HEBREWS",
   "JAS": "JAMES", "1 PET": "1PETER", "2 PET": "2PETER", "1 JN": "1JOHN", "2 JN": "2JOHN",
-  "3 JN": "3JOHN", "JUDE": "JUDE", "REV": "REVELATION"
+  "3 JN": "3JOHN", "JUDE": "JUDE", "REV": "REVELATION", "REVELATIONS": "REVELATION"
 };
+const KNOWN_ENGLISH_BOOKS = Array.from(new Set(Object.values(englishAbbrMap)));
+
+function normalizeBookKey(candidate) {
+  return candidate.toUpperCase().replace(/\./g, '').replace(/\s+/g, ' ').trim().replace(/^([1-3])\s*/, '$1 ');
+}
+
+function resolveEnglishBook(candidate, books) {
+  const key = normalizeBookKey(candidate);
+  if (englishAbbrMap[key]) return englishAbbrMap[key];
+  const compact = key.replace(/\s+/g, '');
+  // Too-short or function-word candidates ("in", "the") would otherwise
+  // prefix-match a real book (e.g. "THE" -> THESONGOFSOLOMON).
+  if (compact.length < 3 || stopWords.has(key.toLowerCase())) return null;
+  return books.find(b => b === compact)
+    || books.find(b => b.startsWith(compact))
+    || books.find(b => b === `THE${compact}`)
+    || null;
+}
+
+// Up to 4 words (plus an optional leading book number) immediately before a
+// "chapter:verse" — wide enough for "Song of Solomon"/"Wisdom of Solomon".
+const BOOK_TAIL_RE = /(?:^|[^A-Za-z0-9.])((?:[1-3]\s*)?[A-Za-z]+\.?(?:\s+[A-Za-z]+\.?){0,3})\s*$/;
+const CHAPTER_VERSE_RE = /(\d+)\s*:\s*(\d+)(?:\s*[-–]\s*(\d+))?/g;
+
+/**
+ * Find every "Book ch:v[-v]" citation in free text. The words before each
+ * chapter:verse are tried longest-suffix-first, so surrounding prose ("as
+ * Jesus said in John 3:16") doesn't swallow the book name, and a bare
+ * "ch:v" right after "; " or ", " inherits the previous citation's book
+ * ("Rom 8:28; 12:1").
+ */
+function parseCitations(text, books) {
+  const citations = [];
+  let prev = null;
+  for (const m of text.matchAll(CHAPTER_VERSE_RE)) {
+    let book = null;
+    const tail = text.slice(Math.max(0, m.index - 50), m.index).match(BOOK_TAIL_RE);
+    if (tail) {
+      const words = tail[1].trim().split(/\s+/);
+      // Keep a leading book number attached to its word ("1 Cor").
+      if (/^[1-3]$/.test(words[0]) && words.length > 1) words.splice(0, 2, `${words[0]} ${words[1]}`);
+      for (let i = 0; i < words.length && !book; i++) {
+        book = resolveEnglishBook(words.slice(i).join(' '), books);
+      }
+    }
+    if (!book && prev && /^\s*[;,]\s*$/.test(text.slice(prev.endIndex, m.index))) book = prev.book;
+    if (!book) continue;
+
+    const chapter = parseInt(m[1], 10);
+    const start = parseInt(m[2], 10);
+    const end = m[3] ? parseInt(m[3], 10) : start;
+    prev = { book, endIndex: m.index + m[0].length };
+    if (end >= start) citations.push({ book, chapter, start, end });
+  }
+  return citations;
+}
 
 export function extractEnglishVersesFromText(text, englishIndex) {
   if (!text || !englishIndex || !englishIndex.bible) return [];
 
-  const uniqueBooks = englishIndex.uniqueBooks;
-  const regex = /((?:[1-3]\s+)?[A-Za-z]+(?:\s+[A-Za-z]+)?)\s+(\d+):\s*(\d+)(?:\s*-\s*(\d+))?/gi;
-  const matches = [...text.matchAll(regex)];
-  
   const extracted = [];
   const seenRefs = new Set();
-  
-  for (const match of matches) {
-    let bookQuery = match[1].trim().toUpperCase();
-    const chapter = parseInt(match[2], 10);
-    const startVerse = parseInt(match[3], 10);
-    const endVerse = match[4] ? parseInt(match[4], 10) : startVerse;
-    
-    // Normalize book query (replace multiple spaces with a single space)
-    bookQuery = bookQuery.replace(/\s+/g, ' ');
-    
-    // 1. Try exact match in abbreviation map
-    let fullBook = englishAbbrMap[bookQuery];
-    
-    // 2. Try prefix match in unique books
-    if (!fullBook) {
-      fullBook = uniqueBooks.find(b => b === bookQuery || b.startsWith(bookQuery) || b.replace(' ', '').startsWith(bookQuery.replace(' ', '')));
-    }
-    
-    if (!fullBook) continue;
-
-    for (let vNum = startVerse; vNum <= endVerse; vNum++) {
-      const matchingVerses = englishIndex.verseByRef.get(`${fullBook}|${chapter}|${vNum}`);
+  for (const { book, chapter, start, end } of parseCitations(text, englishIndex.uniqueBooks)) {
+    for (let vNum = start; vNum <= end; vNum++) {
+      const matchingVerses = englishIndex.verseByRef.get(`${book}|${chapter}|${vNum}`);
       if (!matchingVerses) continue;
       for (const v of matchingVerses) {
         const vId = `${v.book}_${v.chapter}_${v.verse}`;
@@ -365,9 +409,10 @@ const ENGLISH_SYSTEM_INSTRUCTION = `You are Ask Madha, an expert, precise Roman 
 LANGUAGE RULE: You MUST respond ENTIRELY in English, regardless of what language or script the user's question is written in (Tamil, Tanglish, or otherwise). If the question is not in English, understand its meaning first, then write your entire answer in English — do not switch to the input's language.
 
 CRITICAL INSTRUCTIONS:
-1. PRIMARY SOURCE & FALLBACK: Attempt to base your answers on the provided context verses. If they do not contain the answer or are completely irrelevant, silently fall back to your comprehensive general biblical knowledge and answer accurately, providing correct biblical citations from memory. NEVER tell the user the verses were insufficient or missing — do NOT use phrases like "The provided verses do not mention", "The text doesn't say", "Based on the provided context", or "According to the provided text". Your user does not know you are being provided with context verses at all. Act as an omniscient Bible scholar and give the answer directly.
+1. PRIMARY SOURCE & FALLBACK: Attempt to base your answers on the provided context verses. If they do not contain the answer or are completely irrelevant, silently fall back to your comprehensive general biblical knowledge and answer accurately, providing correct biblical citations from memory. NEVER tell the user the verses were insufficient or missing — do NOT use phrases like "The provided verses do not mention", "The text doesn't say", "Based on the provided context", or "According to the provided text". Your user does not know you are being provided with context verses at all. Answer directly, as an expert Bible scholar would.
+   ACCURACY OVER CONFIDENCE: Never invent a verse, citation, name, number, or date. Quote verse text word-for-word only when it appears in the context verses; for passages you recall from memory, cite them and paraphrase rather than inventing exact wording. If you are unsure of the exact verse number, cite the chapter only (e.g. 'John 3'). When Scripture itself does not state something (e.g. an exact date, or a detail known only from Church tradition or scholarship), say so plainly and attribute it — "according to Church tradition", "scholars estimate" — instead of presenting it as Scripture. Saying "the Bible does not record X" when that is true is allowed; only mentioning the provided context verses is banned.
 2. FILL-IN-THE-BLANK QUESTIONS: If the user's input contains blanks (like _______), find the specific verse in the context that matches the text before/after the blanks. The blank phrase might be a paraphrase or come from a different Bible translation (such as NIV) than the provided ESV text (e.g., "Any one hung on a tree is under God's curse" is the NIV translation corresponding to Deuteronomy 21:23, where ESV says "a hanged man is cursed by God"). In such cases, identify the correct verse by its meaning and theology, fill in the blank exactly as the text appears in that matching verse (or the standard translation it's drawn from, if it differs from ESV), and cite it per the CITATIONS rule below.
-3. DEPTH OF EXPLANATION: You are REQUIRED to use your broader biblical knowledge to provide a highly detailed, comprehensive explanation of meanings, historical context, and theological concepts. When discussing feasts, offerings, characters, or practices, you MUST include deep historical background, Hebrew names (if applicable), dates/timing, alternative names, and their deep theological significance. When discussing events, tribes, or locations, you MUST connect them to related historical events (e.g., later migrations, outcomes, related prophecies) across the Bible to provide a complete picture.
+3. DEPTH OF EXPLANATION: You are REQUIRED to use your broader biblical knowledge to provide a highly detailed, comprehensive explanation of meanings, historical context, and theological concepts. When discussing feasts, offerings, characters, or practices, you MUST include deep historical background, Hebrew names (if applicable), dates/timing (marking approximate or scholarly dates as approximate), alternative names, and their deep theological significance. When discussing events, tribes, or locations, you MUST connect them to related historical events (e.g., later migrations, outcomes, related prophecies) across the Bible to provide a complete picture.
 4. CITATIONS: Always convert full book names into standard 3-4 letter English abbreviations (e.g., use 'Deut 2:5' instead of 'Deuteronomy 2:5', use 'Lev 25' instead of 'Leviticus 25'). NEVER use the full book name in citations.
 5. RESPONSE STRUCTURE: Write every substantive answer as natural, flowing prose — NEVER label sections with headings such as "ANSWER:", "EXPLANATION:", "Summary:", or "Introduction:". The only exceptions are greetings and off-topic replies (below), which must NOT use this structure at all.
 - Open with a direct, concise answer to the question in a single sentence or short paragraph. If the question asks why an event happened and a context verse gives the direct biblical explanation, prioritize that verse's own phrasing, and do NOT repeat or paraphrase the question itself (e.g., do NOT start with "God forbade Moses because..." or "Moses was forbidden to enter the Promised Land because..."). Jump straight to the direct biblical statement — e.g., answer "Why did God forbid Moses to enter the Promised Land?" with "Moses broke faith with God in the midst of the people of Israel at the waters of Meribah-kadesh, in the wilderness of Zin (Deut 32:51)."
@@ -386,11 +431,31 @@ Biblical References:
 ${ENGLISH_GREETINGS.map(g => `- ${g}`).join('\n')}
 DO NOT add a "Biblical References" list, DO NOT cite any verses, and ignore the references entirely when sending a greeting.
 
-9. NUMBER FORMATTING RULE: You MUST strictly use numeric digits for all numbers (e.g., "40 Years", "5th", "20 days") instead of writing them out as words (e.g., NEVER use "forty years", "fifth", or "twenty days"). This is a strict requirement.`;
+9. NUMBER FORMATTING RULE: You MUST strictly use numeric digits for all numbers (e.g., "40 Years", "5th", "20 days") instead of writing them out as words (e.g., NEVER use "forty years", "fifth", or "twenty days"). This is a strict requirement.
 
-export async function generateEnglishResponse(query, relevantVerses) {
+10. FOLLOW-UP QUESTIONS: If the user's input is a follow-up (e.g. "tell me more", "who was his father?", "explain that verse"), use the Conversation History to work out what they are referring to, and answer about that subject.
+
+11. PASTORAL CARE: If the user expresses grief, despair, guilt, loneliness, abuse, or thoughts of self-harm or suicide, respond first with warmth and compassion in a short, personal answer (no long historical explanation), offer 2-3 comforting Scripture passages, and gently encourage them to speak with a priest, a trusted person, or a counsellor. If there is any sign of danger to their life or safety, urge them to contact local emergency services or a crisis helpline right away (in India, Tele-MANAS: 14416).`;
+
+// Accepts both the backend's { role, text } shape and the frontend's
+// { sender, text } shape, keeps only the last few turns, and caps each turn so
+// one long previous answer can't crowd out the actual question.
+const HISTORY_TURNS = 4;
+const HISTORY_TURN_MAX_CHARS = 1500;
+
+function formatHistory(history) {
+  if (!Array.isArray(history)) return '';
+  return history
+    .filter(m => m && typeof m.text === 'string' && m.text.trim())
+    .slice(-HISTORY_TURNS)
+    .map(m => `${(m.role || m.sender) === 'user' ? 'User' : 'Assistant'}: ${m.text.trim().slice(0, HISTORY_TURN_MAX_CHARS)}`)
+    .join('\n\n');
+}
+
+export async function generateEnglishResponse(query, relevantVerses, history = []) {
   let contextText = relevantVerses.map(v => `${v.book} ${v.chapter}:${v.verse} - "${v.text}"`).join('\n');
   if (relevantVerses.length === 0) contextText = 'No direct verses found matching the keywords.';
+  const historyText = formatHistory(history);
 
   const specialCaseInstructions = [];
   if (mentionsSolomonCities(query)) {
@@ -405,6 +470,9 @@ export async function generateEnglishResponse(query, relevantVerses) {
 
   const requestPrompt = `Bible verses found for this query:
 ${contextText}
+
+Conversation history (context for follow-up questions):
+${historyText || 'No previous history.'}
 
 User's input: ${query}${specialCaseInstructions.length ? '\n\n' + specialCaseInstructions.join('\n') : ''}`;
 
@@ -422,11 +490,15 @@ User's input: ${query}${specialCaseInstructions.length ? '\n\n' + specialCaseIns
         });
         const responseText = result.text;
 
-        const ansLower = responseText.toLowerCase();
-        const sources = relevantVerses.filter(v => {
-          const chapVerse = `${v.chapter}:${v.verse}`;
-          return ansLower.includes(chapVerse);
-        });
+        // Match citations by book as well as chapter:verse — a bare
+        // includes("3:16") marked every retrieved verse numbered 3:16, in
+        // any book, as cited.
+        const citedKeys = new Set();
+        const books = Array.from(new Set([...KNOWN_ENGLISH_BOOKS, ...relevantVerses.map(v => v.book)]));
+        for (const { book, chapter, start, end } of parseCitations(responseText, books)) {
+          for (let vNum = start; vNum <= end; vNum++) citedKeys.add(`${book}|${chapter}|${vNum}`);
+        }
+        const sources = relevantVerses.filter(v => citedKeys.has(`${v.book}|${v.chapter}|${parseInt(v.verse, 10)}`));
 
         return { answer: responseText, sources };
       } catch (retryError) {

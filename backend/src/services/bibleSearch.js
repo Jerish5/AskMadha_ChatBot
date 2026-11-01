@@ -286,10 +286,10 @@ const BOOK_ABBREVIATIONS = {
   'எஸ்த': 'எஸ்தர்', '1 மக்க': '1 மக்கபேயர்', '2 மக்க': '2 மக்கபேயர்',
   'யோபு': 'யோபு', 'திபா': 'திருப்பாடல்கள்', 'சங்': 'திருப்பாடல்கள்',
   'நீமொ': 'நீதிமொழிகள்', 'சஉ': 'சபை உரையாளர்', 'இபா': 'இனிமைமிகு பாடல்',
-  'சாஞா': 'சாலமோனின் ஞானம்', 'சீஞா': 'சீராக்',
+  'சாஞா': 'சாலமோனின் ஞானம்', 'சீஞா': 'சீராக்கின் ஞானம்',
   'எசா': 'எசாயா', 'எரே': 'எரேமியா', 'புல': 'புலம்பல்', 'பாரூ': 'பாரூக்கு',
   'எசே': 'எசேக்கியேல்', 'தானி': 'தானியேல்',
-  'ஒசே': 'ஒசேயா', 'யோவே': 'யோவேல்', 'ஆமோ': 'ஆமோஸ்', 'ஒப': 'ஒபதியா',
+  'ஒசே': 'ஓசேயா', 'ஓசே': 'ஓசேயா', 'யோவே': 'யோவேல்', 'ஆமோ': 'ஆமோஸ்', 'ஒப': 'ஒபதியா',
   'யோனா': 'யோனா', 'மீக்': 'மீக்கா', 'நாகூ': 'நாகூம்', 'அப': 'அபக்கூக்கு',
   'செப்': 'செப்பனியா', 'ஆகா': 'ஆகாய்', 'செக்': 'செக்கரியா', 'மலா': 'மலாக்கி',
   'மத்': 'மத்தேயு', 'மாற்': 'மாற்கு', 'லூக்': 'லூக்கா', 'யோவா': 'யோவான்',
@@ -306,47 +306,85 @@ const BOOK_ABBREVIATIONS = {
   'விவிஅறி': 'விவிலிய முன்னுரை', 'நூல்அறி': 'நூல் அறிமுகங்கள்'
 };
 
+// Spellings the model (or a user) commonly writes that don't match the
+// dataset's book names: Esther only exists as the Greek "எஸ்தர் (கி)",
+// Hosea is spelled with ஓ, Sirach's full title is "சீராக்கின் ஞானம்".
+const BOOK_ALIASES = {
+  'எஸ்தர்': 'எஸ்தர் (கி)', 'ஒசேயா': 'ஓசேயா', 'சீராக்': 'சீராக்கின் ஞானம்',
+  'திருப்பாடல்': 'திருப்பாடல்கள்', 'தானியேல் (இ)': 'தானியேல்',
+};
+
+/**
+ * Map a book name / abbreviation / alias to the exact dataset book name.
+ * Exact normalized match first, then a prefix match — never a substring
+ * match, and never across a leading book number, so "யோவான்" can't resolve to
+ * "1 யோவான்" (the old includes() check returned all four Johns for "யோவா").
+ */
+function resolveBook(bookQuery, bookNorm) {
+  let q = bookQuery.trim().replace(/\.$/, '').replace(/^(\d)\s*/, '$1 ');
+  q = BOOK_ABBREVIATIONS[q] || q;
+  q = BOOK_ALIASES[q] || q;
+  const nq = normalize(q);
+  if (!nq) return null;
+  const numbered = /^\d/.test(nq);
+  let prefixMatch = null;
+  for (const [book, norm] of bookNorm) {
+    if (norm === nq) return book;
+    if (!prefixMatch && nq.length >= 3 && /^\d/.test(norm) === numbered && norm.startsWith(nq)) prefixMatch = book;
+  }
+  return prefixMatch;
+}
+
+// Per-verses-array lookup tables, built on first use and cached so citation
+// extraction doesn't rescan all ~35K verses for every reference it finds.
+const bookLookupCache = new WeakMap();
+
+function getBookLookup(verses) {
+  let lookup = bookLookupCache.get(verses);
+  if (lookup) return lookup;
+
+  const bookNorm = new Map();
+  const byChapter = new Map(); // "book|chapter" -> verses
+  for (const v of verses) {
+    if (!bookNorm.has(v.book)) bookNorm.set(v.book, normalize(v.book));
+    const key = `${v.book}|${v.chapter}`;
+    if (!byChapter.has(key)) byChapter.set(key, []);
+    byChapter.get(key).push(v);
+  }
+  // Longest first so "1 யோவான்" wins over "யோவான்" and "திருப்பாடல்கள்" over "திருப்பாடல்".
+  const names = [...bookNorm.keys(), ...Object.keys(BOOK_ABBREVIATIONS), ...Object.keys(BOOK_ALIASES)]
+    .sort((a, b) => b.length - a.length)
+    .map(b => b.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  lookup = { bookNorm, byChapter, bookPattern: names.join('|') };
+  bookLookupCache.set(verses, lookup);
+  return lookup;
+}
+
+function versesInRange(lookup, book, chapter, startVerse, endVerse) {
+  const chapterVerses = lookup.byChapter.get(`${book}|${chapter}`) || [];
+  if (startVerse === null) return chapterVerses;
+  return chapterVerses.filter((v) => {
+    const vNum = parseInt(v.verse, 10);
+    return !isNaN(vNum) && vNum >= startVerse && vNum <= endVerse;
+  });
+}
+
 /**
  * Try to parse a query as a direct verse reference.
  * Returns matching verses or null if the query isn't a reference.
  */
-function parseDirectReference(verses, query, bookNormCache) {
-  const q = query.trim();
-  const m = q.match(REF_PATTERN);
+function parseDirectReference(verses, query) {
+  const m = query.trim().match(REF_PATTERN);
   if (!m) return null;
 
-  let bookQuery = m[1].trim();
+  const lookup = getBookLookup(verses);
+  const book = resolveBook(m[1], lookup.bookNorm);
+  if (!book) return null;
 
-  // Expand abbreviation if it exists
-  for (const [abbr, full] of Object.entries(BOOK_ABBREVIATIONS)) {
-    if (bookQuery === abbr || bookQuery === abbr + '.') {
-      bookQuery = full;
-      break;
-    }
-  }
-
-  bookQuery = normalize(bookQuery);
   const chapter = parseInt(m[2], 10);
   const startVerse = m[3] ? parseInt(m[3], 10) : null;
-  const endVerse = m[4] ? parseInt(m[4], 10) : startVerse; // If no range, endVerse = startVerse
-
-  // Find matching book (fuzzy: normalize both sides). bookNormCache holds
-  // normalize(book) precomputed once per unique book at index-build time,
-  // instead of recomputing it for every one of the ~35K verses on every
-  // reference-style query.
-  const matchingVerses = verses.filter((v) => {
-    const bookNorm = bookNormCache ? bookNormCache.get(v.book) : normalize(v.book);
-    if (!bookNorm.includes(bookQuery) && !bookQuery.includes(bookNorm)) return false;
-    if (v.chapter !== chapter) return false;
-
-    if (startVerse !== null) {
-      const vNum = parseInt(v.verse, 10);
-      if (isNaN(vNum)) return false;
-      if (vNum < startVerse || vNum > endVerse) return false;
-    }
-    return true;
-  });
-
+  const endVerse = m[4] ? parseInt(m[4], 10) : startVerse;
+  const matchingVerses = versesInRange(lookup, book, chapter, startVerse, endVerse);
   return matchingVerses.length > 0 ? matchingVerses : null;
 }
 
@@ -522,7 +560,7 @@ export function searchBible(bibleIndex, query, maxResults = 12, bookFilter = 'al
   const { index, verses, sortedKeys, bookNormCache, refIndexMap } = bibleIndex;
 
   // ── Step 1: Direct reference check ──
-  const directMatch = parseDirectReference(verses, query.trim(), bookNormCache);
+  const directMatch = parseDirectReference(verses, query.trim());
   if (directMatch) return directMatch.slice(0, maxResults);
 
   // ── Step 2: Expand query with thematic synonyms ──
@@ -687,57 +725,42 @@ export const BIBLE_BOOKS = [
 
 /**
  * Extract all Bible verses cited in a block of text, mapping them to the full verses array.
- * Supports ranges like "மத்தேயு 5:44-48"
+ * Supports ranges like "மத்தேயு 5:44-48" and follow-on references that reuse the
+ * previous book, like "உரோமையர் 8:28; 12:1".
  */
 export function extractVersesFromText(text, verses) {
   if (!text || !verses) return [];
-  
-  // Collect unique books from the loaded database (including prefaces and intros)
-  const uniqueBooks = Array.from(new Set(verses.map(v => v.book)));
-  
-  // Sort books by length descending to match longest first
-  const allBooks = [...uniqueBooks, ...Object.keys(BOOK_ABBREVIATIONS)].sort((a, b) => b.length - a.length);
-  const bookRegexStr = allBooks.map(b => b.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
-  
-  // (Book Name) (Chapter):(Verse)(-(Verse))?
-  const regex = new RegExp(`(${bookRegexStr})\\s+(\\d+):\\s*(\\d+)(?:\\s*-\\s*(\\d+))?`, 'giu');
-  
-  const matches = [...text.matchAll(regex)];
+
+  const lookup = getBookLookup(verses);
+  // The lookbehind stops a short abbreviation (e.g. "அப") matching the tail
+  // of an unrelated Tamil word that happens to precede a number.
+  const regex = new RegExp(
+    `(?<![\\u0B80-\\u0BFF])(${lookup.bookPattern})\\.?\\s*(\\d+)\\s*:\\s*(\\d+)(?:\\s*[-–]\\s*(\\d+))?((?:\\s*[;,]\\s*\\d+\\s*:\\s*\\d+(?:\\s*[-–]\\s*\\d+)?)*)`,
+    'gu'
+  );
+
   const extracted = [];
   const seenRefs = new Set();
-  
-  for (const match of matches) {
-    const bookQuery = match[1];
-    const chapter = parseInt(match[2], 10);
-    const startVerse = parseInt(match[3], 10);
-    const endVerse = match[4] ? parseInt(match[4], 10) : startVerse;
-    
-    let fullBook = bookQuery;
-    const nq = normalize(bookQuery);
-    // Find the full book name if it's an abbreviation, otherwise rely on BIBLE_BOOKS match
-    for (const [abbr, full] of Object.entries(BOOK_ABBREVIATIONS)) {
-      if (nq === normalize(abbr)) {
-        fullBook = full; break;
-      }
-    }
-    
-    const matchingVerses = verses.filter(v => {
-      const vBookNorm = normalize(v.book);
-      const qBookNorm = normalize(fullBook);
-      if (vBookNorm !== qBookNorm && !vBookNorm.includes(qBookNorm)) return false;
-      if (v.chapter !== chapter) return false;
-      const vNum = parseInt(v.verse, 10);
-      if (isNaN(vNum)) return false;
-      return vNum >= startVerse && vNum <= endVerse;
-    });
-    
-    for (const v of matchingVerses) {
+  const add = (book, chapter, startVerse, endVerse) => {
+    for (const v of versesInRange(lookup, book, chapter, startVerse, endVerse)) {
       if (!seenRefs.has(v.ref)) {
         seenRefs.add(v.ref);
         extracted.push(v);
       }
     }
+  };
+
+  for (const match of text.matchAll(regex)) {
+    const book = resolveBook(match[1], lookup.bookNorm);
+    if (!book) continue;
+    const startVerse = parseInt(match[3], 10);
+    add(book, parseInt(match[2], 10), startVerse, match[4] ? parseInt(match[4], 10) : startVerse);
+
+    for (const extra of match[5].matchAll(/(\d+)\s*:\s*(\d+)(?:\s*[-–]\s*(\d+))?/g)) {
+      const s2 = parseInt(extra[2], 10);
+      add(book, parseInt(extra[1], 10), s2, extra[3] ? parseInt(extra[3], 10) : s2);
+    }
   }
-  
+
   return extracted;
 }

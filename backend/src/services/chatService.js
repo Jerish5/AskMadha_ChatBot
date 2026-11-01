@@ -1708,11 +1708,51 @@ const SAFE_RC_TERMS = (() => {
   return Array.from(safe).sort((a, b) => b.length - a.length);
 })();
 
-function sanitizeCsiText(text) {
+// A CSI term only counts as a match when it starts a word (not preceded by a
+// Tamil letter or sign) and isn't cut off mid-letter (not followed by a vowel
+// sign or virama). Without this, plain substring matching rewrote the inside
+// of unrelated words — e.g. சட்டம் inside குறுக்குச்சட்டம் ("crossbar") and
+// பிரிந்த inside பிரிந்து ("having parted") — producing broken Tamil.
+const TAMIL_LETTER_RE = /[஀-௿]/;
+const TAMIL_COMBINING_RE = /[ா-்ௗ]/;
+
+function replaceWholeWordStart(text, term, replacement) {
+  let out = '';
+  let from = 0;
+  let at = text.indexOf(term);
+  while (at !== -1) {
+    const before = at > 0 ? text[at - 1] : '';
+    const after = text[at + term.length] || '';
+    if (!TAMIL_LETTER_RE.test(before) && !TAMIL_COMBINING_RE.test(after)) {
+      out += text.slice(from, at) + replacement;
+      from = at + term.length;
+    }
+    at = text.indexOf(term, at + term.length);
+  }
+  return out + text.slice(from);
+}
+
+// Scripture quoted in an answer, e.g. “திருச்சட்டத்தையோ...”, must reach the
+// user exactly as the Catholic திருவிவிலியம் has it — legitimate Bible words
+// like சட்டம் (the Law) or சத்தியம் (an oath) are on the CSI list too.
+const QUOTED_SPAN_RE = /“[^”]{6,}”|"[^"\n]{6,}"/g;
+
+function sanitizeCsiText(text, preserve = []) {
   if (!text) return text;
   let sanitized = text;
   const placeholders = [];
   let phCounter = 0;
+
+  const preserved = [...preserve, ...(text.match(QUOTED_SPAN_RE) || [])]
+    .filter(span => span && span.length >= 6)
+    .sort((a, b) => b.length - a.length);
+  for (const span of preserved) {
+    if (sanitized.includes(span)) {
+      const ph = `__KEEP_${phCounter++}__`;
+      placeholders.push([ph, span]);
+      sanitized = sanitized.split(span).join(ph);
+    }
+  }
 
   for (const rc of SAFE_RC_TERMS) {
     if (sanitized.includes(rc)) {
@@ -1726,8 +1766,11 @@ function sanitizeCsiText(text) {
     const [csi, rc] = TERM_REPLACEMENTS[i];
     if (sanitized.includes(csi)) {
       const ph = `__RC_REP_${phCounter++}__`;
-      placeholders.push([ph, rc]);
-      sanitized = sanitized.split(csi).join(ph);
+      const replaced = replaceWholeWordStart(sanitized, csi, ph);
+      if (replaced !== sanitized) {
+        placeholders.push([ph, rc]);
+        sanitized = replaced;
+      }
     }
   }
 
@@ -1837,10 +1880,11 @@ const SYSTEM_INSTRUCTION = [
   '## 3. KNOWLEDGE & SOURCING',
   'You are given some "references" retrieved from the Tamil Bible database for each question. These may or may not actually answer it.',
   '1. If the references are relevant and sufficient: use them, and cite the exact verse (e.g., மத்தேயு 5:44).',
-  '2. If the references are NOT relevant, incomplete, or missing: silently fall back to your own comprehensive knowledge of the Catholic Tamil Bible (திருவிவிலியம்). Identify the correct passage(s) yourself, provide the accurate verse text and citation from memory, and answer as if you always knew it.',
-  '3. NEVER tell the user the references were insufficient or absent. Banned, in any phrasing: "இந்த வசனங்களில் குறிப்பிடப்படவில்லை", "the provided verses do not mention", "based on the provided context", "the text doesn\'t say", or anything equivalent. The user does not know references were retrieved for you at all — always answer directly, as an omniscient Bible scholar would.',
+  '2. If the references are NOT relevant, incomplete, or missing: silently fall back to your own knowledge of the Catholic Tamil Bible (திருவிவிலியம்). Identify the correct passage(s) yourself, cite them, and answer as if you always knew it. Quote verse text word-for-word ONLY when it appears in the references; for passages you recall from memory, give the citation and explain their content in your own words instead of inventing exact wording.',
+  '3. NEVER tell the user the references were insufficient or absent. Banned, in any phrasing: "இந்த வசனங்களில் குறிப்பிடப்படவில்லை", "the provided verses do not mention", "based on the provided context", "the text doesn\'t say", or anything equivalent. The user does not know references were retrieved for you at all — always answer directly, as an expert Bible scholar would.',
   '4. Always explain, not just cite: give the meaning, historical background, and theological significance (see DEPTH OF EXPLANATION below).',
   '5. For questions about a person, event, or theme, list ALL major relevant passages across the whole Bible — not just the first one you find.',
+  '6. ACCURACY OVER CONFIDENCE: Never invent a verse, citation, name, number, or date. If you are unsure of the exact verse number, cite the chapter only (e.g. யோவான் 3). When Scripture itself does not state something (an exact date, or a detail known only from Church tradition or scholarship), say so plainly and attribute it — e.g. "திருச்சபை மரபின்படி" or "விவிலிய அறிஞர்களின் கணிப்புப்படி" — instead of presenting it as Scripture. Saying "திருவிவிலியம் இதைக் குறிப்பிடவில்லை" when that is true is allowed; only mentioning the retrieved references is banned (rule 3).',
   '',
   '## 4. CITATIONS',
   'Format every citation in Tamil only — full book name or standard Tamil abbreviation (e.g. திபா for Psalms) — plus chapter:verse. Examples: மத்தேயு 5:44, திபா 74:10-11. NEVER use English book names or English abbreviations (no "Gen", "Ps", "Matt", "1 Kings") anywhere in your response, including citations — they must stay 100% Tamil like everything else.',
@@ -1850,7 +1894,7 @@ const SYSTEM_INSTRUCTION = [
   'Every verse you cite must directly support the specific claim it is attached to — do not pad the list with tangential verses.',
   '',
   '## 5. DEPTH, ENUMERATION & CONNECTIONS',
-  'DEPTH OF EXPLANATION: Use your broader biblical knowledge to give a highly detailed, comprehensive explanation of meanings, historical context, and theological concepts. When discussing feasts, offerings, characters, or practices, include deep historical background, Hebrew names (if applicable), dates/timing, alternative names, and their theological significance. When discussing events, tribes, or locations, connect them to related historical events (e.g., later migrations, outcomes, related prophecies) elsewhere in the Bible for a complete picture.',
+  'DEPTH OF EXPLANATION: Use your broader biblical knowledge to give a highly detailed, comprehensive explanation of meanings, historical context, and theological concepts. When discussing feasts, offerings, characters, or practices, include deep historical background, Hebrew names (if applicable), dates/timing (marking approximate or scholarly dates as approximate), alternative names, and their theological significance. When discussing events, tribes, or locations, connect them to related historical events (e.g., later migrations, outcomes, related prophecies) elsewhere in the Bible for a complete picture.',
   'ENUMERATION: If the user asks to list, enumerate, or describe multiple items, explicitly number them (e.g., 1) Item One, 2) Item Two) and capture ALL items mentioned in the relevant text — be thorough so you do not miss any.',
   '',
   '## 6. RESPONSE STRUCTURE',
@@ -1884,6 +1928,9 @@ const SYSTEM_INSTRUCTION = [
   'If the user greets in English, RANDOMLY pick ONE of these:',
   ...ENGLISH_GREETINGS.map(g => `- ${g}`),
   'DO NOT add an ஆதார விவிலிய குறிப்புகள் list, DO NOT cite any verses, and ignore the retrieved references entirely when sending a greeting.',
+  '',
+  '## 11. PASTORAL CARE',
+  'If the user expresses grief, despair, guilt, loneliness, abuse, or thoughts of self-harm or suicide, respond first with warmth and compassion in a short, personal Tamil answer (no long historical explanation), offer 2-3 comforting Scripture passages, and gently encourage them to speak with an அருட்பணியாளர், a trusted person, or a counsellor. If there is any sign of danger to their life or safety, urge them to contact local emergency services or a crisis helpline right away (in India, Tele-MANAS: 14416).',
 ].join('\n');
 
 const CHAT_MODEL_NAME = 'gemini-2.5-flash';
@@ -1952,13 +1999,17 @@ export async function generateChatResponse(query, messages, references) {
     );
   }
 
-  const sanitizedHistory = messages.slice(-4).map(m => ({
-    ...m,
-    text: sanitizeCsiText(m.text),
-  }));
-
-  const recentHistoryText = sanitizedHistory.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.text}`).join('\n\n');
-  const referenceText = references.map(r => `${r.ref}: ${sanitizeCsiText(r.text)}`).join('\n');
+  // Accepts both { role, text } and the frontend's { sender, text } shape.
+  const recentHistoryText = (Array.isArray(messages) ? messages : [])
+    .filter(m => m && typeof m.text === 'string' && m.text.trim())
+    .slice(-4)
+    .map(m => `${(m.role || m.sender) === 'user' ? 'User' : 'Assistant'}: ${sanitizeCsiText(m.text.trim().slice(0, 1500))}`)
+    .join('\n\n');
+  // References are verbatim Catholic திருவிவிலியம் text — already RC, so they
+  // are passed through untouched. Running the CSI replacer over them used to
+  // alter ~2,200 verses (e.g. the Law, சட்டம், became ஒழுங்கு throughout the
+  // Torah), and the model then quoted the altered text back to the user.
+  const referenceText = references.map(r => `${r.ref}: ${r.text}`).join('\n');
 
   const requestPrompt = [
     '## BIBLE REFERENCES:',
@@ -1979,8 +2030,10 @@ export async function generateChatResponse(query, messages, references) {
     });
     const responseText = result.text;
 
-    let aiAnswer = stripEnglishParentheses(responseText);
-    let finalAnswer = sanitizeCsiText(aiAnswer);
+    // Verse texts the model quotes from the references are preserved exactly;
+    // English parentheses are stripped after sanitizing because a few
+    // replacement terms themselves carry an English gloss.
+    let finalAnswer = stripEnglishParentheses(sanitizeCsiText(responseText, references.map(r => r.text)));
 
     if (finalAnswer.startsWith(sanitizedQuestion)) {
       finalAnswer = finalAnswer.slice(sanitizedQuestion.length).replace(/^[\s\n\-—:;!?,.]+/g, '').trim();
